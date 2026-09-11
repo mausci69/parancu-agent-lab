@@ -1,0 +1,127 @@
+{
+  "settings": {
+    "title": "Impostazioni",
+    "language": "Lingua",
+    "languageHint": "Si applica ai testi e ai messaggi dell’app.",
+    "english": "Inglese",
+    "italian": "Italiano",
+    "ocrEngine": "Motore OCR",
+    "server": "Server",
+    "device": "Sul dispositivo",
+    "ocrHint": "Sul dispositivo può essere più lento ma funziona offline; il server è più veloce online.",
+    "genEngine": "Motore di generazione",
+    "genHint": "Scegli il modello preferito. Alcune opzioni richiedono Internet.",
+    "save": "Salva",
+    "saving": "Salvataggio…",
+    "saved": "Impostazioni salvate",
+    "saveErrorTitle": "Impossibile salvare",
+    "saveErrorBody": "Riprova, per favore."
+  },
+  "common": {
+    "cancel": "Annulla",
+    "clear": "Svuota",
+    "close": "Chiudi"
+  },
+  "tabs": {
+    "ask": "Ask",
+    "uploadText": "Upload",
+    "scanPdf": "Scan"
+  },
+  "a11y": {
+    "tabAsk": "Scheda Domanda",
+    "tabUpload": "Scheda Carica testo",
+    "tabScan": "Scheda Scansione PDF",
+    "tabSettings": "Scheda Impostazioni",
+    "questionInput": "Campo domanda",
+    "questionInputHint": "Scrivi la domanda e premi invio",
+    "retrieve": "Recupera il miglior chunk",
+    "loading": "Caricamento",
+    "showAlt": "Mostra chunk alternativo",
+    "hideAlt": "Nascondi chunk alternativo",
+    "topChunkCard": "Chunk principale",
+    "topChunkScroll": "Contenuto chunk principale",
+    "timeTaken": "Tempo impiegato",
+    "scan": {
+      "addFromCamera": "Aggiungi pagina dalla fotocamera",
+      "addFromLibrary": "Aggiungi pagina dalla galleria",
+      "retakeLast": "Riscatta ultima pagina",
+      "assemblePdf": "Assembla PDF dalle pagine",
+      "removePage": "Rimuovi pagina {{n}}",
+      "clearQueue": "Svuota coda di pagine e testo",
+      "extractText": "Estrai testo dalle pagine"
+    }
+  },
+  "scan": {
+    "flowTitle": "Scansione e OCR",
+    "retakeLast": "Riscatta ultima",
+    "clearConfirmTitle": "Svuotare tutte le pagine?",
+    "clearConfirmBody": "Questo rimuoverà le pagine in coda e qualsiasi testo estratto.",
+    "backend": {
+      "okBadge": "Backend: {{status}} — OCR: pronto ({{lang}})",
+      "unreachableBadge": "Backend non raggiungibile: {{status}}"
+    },
+    "noPagesYet": "Nessuna pagina. Aggiungi foto o immagini per iniziare.",
+    "pageCount": "Pagine: {{count}}",
+    "assemblePdf": "Assembla PDF",
+    "extractPages": "Estrai testo dalle pagine",
+    "processing_one": "Elaborazione di {{count}} pagina ({{kb}} KB)…",
+    "processing_other": "Elaborazione di {{count}} pagine ({{kb}} KB)…",
+    "combinedTitle": "Anteprima testo combinato",
+    "debugLang": "OCR server: {{lang}} — pagine: {{n}}",
+    "pageOk": "✓ Pagina {{n}}",
+    "pageFail": "✗ Pagina {{n}} — {{error}}",
+    "prepareFromText": "Prepara corpus dal testo",
+    "clearQueue": "Svuota coda",
+    "reorderTip": "Suggerimento: riordina le pagine con le frecce; rimuovi con il pulsante ×.",
+    "saveBtn": "Salva corpus",
+    "loadBtn": "Carica corpus",
+    "chooseCorpus": "Scegli un corpus salvato da caricare.",
+    "chooseName": "Scegli un nome per il corpus salvato.",
+    "savedCorpusShort": "Corpus salvato.",
+    "loadedSavedCorpusShort": "Corpus caricato.",
+    "noActiveCorpusToSave": "Nessun corpus preparato attivo da salvare.",
+    "noSavedCorpus": "Nessun corpus salvato trovato.",
+    "saveFailed": "Salvataggio non riuscito.",
+    "saveFailedTitle": "Salvataggio non riuscito",
+    "loadFailed": "Caricamento non riuscito.",
+    "loadFailedTitle": "Caricamento non riuscito",
+    "alerts": {},
+    "alertsLegacy": {},
+    "alert": {
+      "pdfSavedTitle": "PDF salvato",
+      "pdfSavedBody": "Salvato in: {{uri}}",
+      "assembleFailedTitle": "Assemblaggio non riuscito",
+      "extractFailedTitle": "Estrazione non riuscita",
+      "cameraErrorTitle": "Errore fotocamera",
+      "cameraErrorBody": "Impossibile aprire la fotocamera. {{detail}}",
+      "galleryErrorTitle": "Errore galleria",
+      "galleryErrorBody": "Impossibile aprire la galleria. {{detail}}"
+    },
+    "hints": {
+      "tooLarge": "Suggerimento: le immagini sono troppo grandi. Prova meno pagine o una risoluzione più bassa.",
+      "unsupportedType": "Suggerimento: tipo di file non supportato. Usa foto JPEG/PNG.",
+      "requestInvalid": "Suggerimento: richiesta non valida. Riordina le pagine o rifai una foto sfocata."
+    },
+    "langEnglish": "Inglese",
+    "langItalian": "Italiano",
+    "title": "Scansione (PDF)",
+    "done": "Caricate {{n}} pagina/e{{path}}",
+    "offlineBanner": "Impossibile raggiungere il server. Puoi accodare pagine, ma le azioni verso il backend saranno disabilitate."
+  },
+  "prepare": {
+    "tooShortTitle": "Testo troppo breve",
+    "tooShortBody": "Aggiungi più contenuto prima di preparare.",
+    "ready": "Pronto per le domande"
+  },
+  "ocr": {
+    "offline": {
+      "noTextAlertTitle": "Nessun testo da elaborare",
+      "noTextAlertBody": "Estrai prima il testo o incolla del contenuto.",
+      "summaryFailTitle": "Impossibile generare il riepilogo",
+      "questionsFailTitle": "Impossibile generare le domande",
+      "genSummary": "Genera riepilogo",
+      "genQuestions": "Genera domande",
+      "outputLabel": "Output"
+    }
+  }
+}

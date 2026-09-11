@@ -1,0 +1,19 @@
+[
+  {
+    "qid": "q1_where_developed_it",
+    "question": "Dov'è stato sviluppato il progetto EcoSearch?",
+    "expected_contains": ["Catania"],
+    "also_accept": ["Barcellona"]
+  },
+  {
+    "qid": "q2_index_eng",
+    "question": "What index does EcoSearch use to locate relevant chunks?",
+    "expected_contains": ["FAISS"]
+  },
+  {
+    "qid": "q3_ocr_langs_it",
+    "question": "Quali lingue supporta l’OCR?",
+    "expected_contains": ["Inglese", "Italiano"],
+    "notes": "Previously drifted; for precision tuning."
+  }
+]

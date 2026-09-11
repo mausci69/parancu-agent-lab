@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "ParancU",
+    "slug": "ecosearch-mobile",
+    "icon": "./assets/icon.png",
+    "scheme": "ecosearch",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "ParancU needs camera access to take photos of documents for OCR.",
+        "NSPhotoLibraryUsageDescription": "ParancU needs access to your photo library so you can select images to run OCR.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.anonymous.ecosearch-mobile"
+    },
+    "android": {
+      "permissions": [
+        "CAMERA"
+      ],
+      "package": "com.anonymous.ecosearchmobile"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "b38da72d-5572-445c-9526-012e3e47fefe"
+      }
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "17.0"
+          }
+        }
+      ],
+      "expo-localization",
+      "expo-asset"
+    ]
+  }
+}

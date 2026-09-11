@@ -1,0 +1,33 @@
+{
+  "cli": {
+    "version": ">= 18.8.1",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal"
+    },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_OFFLINE": "1",
+        "EXPO_PUBLIC_OPENAI_MODEL": "gpt-5.4-mini"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_OFFLINE": "1",
+        "EXPO_PUBLIC_OPENAI_MODEL": "gpt-5.4-mini"
+      }
+    },
+    "local-production": {
+      "extends": "production",
+      "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

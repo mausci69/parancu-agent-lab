@@ -1,0 +1,84 @@
+jobs:
+  setup:
+    name: Setup (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ "3.10", "3.11" ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip wheel
+
+      - name: Install backend deps (if present)
+        run: |
+          if [ -f backend/requirements.txt ]; then pip install -r backend/requirements.txt; fi
+
+      - name: Install web deps (if present)
+        run: |
+          if [ -f web/requirements.txt ]; then pip install -r web/requirements.txt; fi
+
+      - name: Install lint/type tools
+        run: |
+          pip install ruff mypy
+
+      - name: Ruff lint (fail on error)
+        run: |
+          ruff --version
+          ruff check . \
+            --output-format=github \
+            --line-length=100 \
+            --exclude logs,__pycache__,.venv,.mypy_cache,data
+
+      - name: Mypy type-check (fail on error)
+        run: |
+          mypy --version
+          mypy . \
+            --python-version 3.11 \
+            --ignore-missing-imports \
+            --install-types --non-interactive \
+            --exclude '^(data|logs|\.venv|__pycache__|\.mypy_cache)/'
+
+      - name: Sanity check
+        run: |
+          python -c "import sys, platform; print('OK', sys.version, platform.python_implementation())"
+
+      - name: Install test deps
+        run: |
+          pip install pytest pytest-cov
+
+      - name: Run tests with coverage gate
+        run: |
+          pytest --disable-warnings --maxfail=1 \
+                 --cov=. --cov-report=term-missing --cov-fail-under=5
+
+      - name: Build backend Docker image
+        run: |
+          docker build -f backend/Dockerfile -t ecosearch-backend:ci .
+
+      - name: Build web Docker image (if present)
+        run: |
+          if [ -f web/Dockerfile ]; then \
+            docker build -f web/Dockerfile -t ecosearch-web:ci .; \
+          else \
+            echo "No web/Dockerfile, skipping"; \
+          fi
+

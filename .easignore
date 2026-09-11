@@ -1,0 +1,67 @@
+# OS cruft
+.DS_Store
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local config & secrets
+.env
+*.env
+.env.*
+*.log
+
+# Python virtual env
+.venv/
+
+# Node / React Native
+node_modules/
+.expo/
+dist/
+build/
+
+# Data / corpora / models
+data/
+datasets/
+
+
+# Local-only legacy backend (mobile-only project)
+eco_backend.py
+
+# --- Local eval artefacts (mobile-only repo) ---
+eval_runs_ab/
+eval_log.txt
+evaluation_results_local.json
+evaluate_local.py
+payload_build_test_set.json
+payload_evaluate.json
+corpus_qa_from_txt.json
+legacy_json/
+eco/
+backend/
+*.py
+
+# Mobile local build/output artifacts
+/apps/mobile/dist-eas-test/
+/apps/mobile/coverage/
+
+# Mobile local evaluation outputs
+/apps/mobile/ecosearch_eval_results.csv
+/apps/mobile/ecosearch_eval_results.json
+
+# Mobile local test/demo corpora
+/apps/mobile/corpus_*.json
+/apps/mobile/test_set_question_answering_25_short_queries.json
+
+# Mobile local helper scripts
+/apps/mobile/evaluate_ecosearch_corpus.py
+
+# Mobile draft/old assets
+/apps/mobile/assets/icon_draft.png
+/apps/mobile/assets/icon_old.png
+
+# E5 runtime assets required by ParancU
+apps/mobile/assets/models/e5/*
+!apps/mobile/assets/models/e5/model_int8.onnx
+!apps/mobile/assets/models/e5/tokenizer.json
+!apps/mobile/assets/models/e5/tokenizer_config.json

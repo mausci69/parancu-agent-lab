@@ -1,0 +1,127 @@
+{
+  "settings": {
+    "title": "Settings",
+    "language": "Language",
+    "languageHint": "Applies to app text and messages.",
+    "english": "English",
+    "italian": "Italiano",
+    "ocrEngine": "OCR engine",
+    "server": "Server",
+    "device": "On-device",
+    "ocrHint": "On-device may be slower but can work offline; server is faster when online.",
+    "genEngine": "Generation engine",
+    "genHint": "Choose your preferred model. Some options require internet connectivity.",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Settings saved",
+    "saveErrorTitle": "Could not save",
+    "saveErrorBody": "Please try again."
+  },
+  "common": {
+    "cancel": "Cancel",
+    "clear": "Clear",
+    "close": "Close"
+  },
+  "tabs": {
+    "ask": "Ask",
+    "uploadText": "Upload",
+    "scanPdf": "Scan"
+  },
+  "a11y": {
+    "tabAsk": "Ask tab",
+    "tabUpload": "Upload text tab",
+    "tabScan": "Scan PDF tab",
+    "tabSettings": "Settings tab",
+    "questionInput": "Question input",
+    "questionInputHint": "Type your question and press send",
+    "retrieve": "Retrieve best chunk",
+    "loading": "Loading",
+    "showAlt": "Show alternative chunk",
+    "hideAlt": "Hide alternative chunk",
+    "topChunkCard": "Top chunk",
+    "topChunkScroll": "Top chunk content",
+    "timeTaken": "Time taken",
+    "scan": {
+      "addFromCamera": "Add page from camera",
+      "addFromLibrary": "Add page from gallery",
+      "retakeLast": "Retake last page",
+      "assemblePdf": "Assemble PDF from pages",
+      "removePage": "Remove page {{n}}",
+      "clearQueue": "Clear queued pages and text",
+      "extractText": "Extract text from pages"
+    }
+  },
+  "scan": {
+    "flowTitle": "Scan & OCR",
+    "retakeLast": "Retake last",
+    "clearConfirmTitle": "Clear all pages?",
+    "clearConfirmBody": "This will remove queued pages and any extracted text.",
+    "backend": {
+      "okBadge": "Backend: {{status}} — OCR: ready ({{lang}})",
+      "unreachableBadge": "Backend unreachable: {{status}}"
+    },
+    "noPagesYet": "No pages yet. Add photos or images to start.",
+    "pageCount": "Pages: {{count}}",
+    "assemblePdf": "Assemble PDF",
+    "extractPages": "Extract text from pages",
+    "processing_one": "Processing {{count}} page ({{kb}} KB)…",
+    "processing_other": "Processing {{count}} pages ({{kb}} KB)…",
+    "combinedTitle": "Combined text preview",
+    "debugLang": "Server OCR: {{lang}} — pages: {{n}}",
+    "pageOk": "✓ Page {{n}}",
+    "pageFail": "✗ Page {{n}} — {{error}}",
+    "prepareFromText": "Prepare corpus from text",
+    "clearQueue": "Clear queue",
+    "reorderTip": "Tip: reorder pages using the arrows; remove with the × button.",
+    "saveBtn": "Save Corpus",
+    "loadBtn": "Load Corpus",
+    "chooseCorpus": "Choose a saved corpus to load.",
+    "chooseName": "Choose a name for the saved corpus.",
+    "savedCorpusShort": "Prepared corpus saved.",
+    "loadedSavedCorpusShort": "Saved corpus loaded.",
+    "noActiveCorpusToSave": "No active prepared corpus to save.",
+    "noSavedCorpus": "No saved prepared corpus found.",
+    "saveFailed": "Save failed.",
+    "saveFailedTitle": "Save failed",
+    "loadFailed": "Load failed.",
+    "loadFailedTitle": "Load failed",
+    "alerts": {},
+    "alertsLegacy": {},
+    "alert": {
+      "pdfSavedTitle": "PDF saved",
+      "pdfSavedBody": "Saved to: {{uri}}",
+      "assembleFailedTitle": "Assemble failed",
+      "extractFailedTitle": "Extract failed",
+      "cameraErrorTitle": "Camera error",
+      "cameraErrorBody": "Could not open the camera. {{detail}}",
+      "galleryErrorTitle": "Gallery error",
+      "galleryErrorBody": "Could not open the gallery. {{detail}}"
+    },
+    "hints": {
+      "tooLarge": "Hint: images are too large. Try fewer pages or lower resolution.",
+      "unsupportedType": "Hint: unsupported file type. Use JPEG/PNG photos.",
+      "requestInvalid": "Hint: request invalid. Reorder pages or retake a blurry photo."
+    },
+    "langEnglish": "English",
+    "langItalian": "Italiano",
+    "title": "Scan (PDF)",
+    "done": "Uploaded {{n}} page(s){{path}}",
+    "offlineBanner": "Can’t reach the server right now. You can still queue pages, but actions that contact the backend will be disabled."
+  },
+  "prepare": {
+    "tooShortTitle": "Text too short",
+    "tooShortBody": "Please add more content before preparing.",
+    "ready": "Ready to ask"
+  },
+  "ocr": {
+    "offline": {
+      "noTextAlertTitle": "No text to process",
+      "noTextAlertBody": "Extract text first or paste content.",
+      "summaryFailTitle": "Could not generate summary",
+      "questionsFailTitle": "Could not generate questions",
+      "genSummary": "Generate summary",
+      "genQuestions": "Generate questions",
+      "outputLabel": "Output"
+    }
+  }
+}
