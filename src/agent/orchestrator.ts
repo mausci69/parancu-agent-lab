@@ -3,6 +3,7 @@ import type { PrepareResult } from "../../services/parancu-api/src/local/prepare
 import { coordinate } from "../coordinator/coordinator";
 import { verifyEvidence } from "../verifier/evidenceVerifier";
 import { generateResponse } from "../responder/responseAgent";
+import type { OrchestrationTrace } from "../observability/orchestrationTrace";
 import {
   retrieveCandidatesFromPrepared,
   type RetrieveResult
@@ -32,6 +33,7 @@ export type OrchestratorDependencies = {
   retrieveCandidates: RetrieveCandidates;
   generateAnswer: GenerateAnswer;
   verifyAnswer: VerifyAnswer;
+  trace?: OrchestrationTrace;
 };
 
 const defaultDependencies: OrchestratorDependencies = {
@@ -82,18 +84,37 @@ export async function runOrchestrator(
       5
     );
 
+  dependencies.trace?.events.push({
+    type: "retrieval_completed",
+    candidateCount: candidates.length
+  });
+
   for (
     let candidateIndex = 0;
     candidateIndex < candidates.length;
     candidateIndex += 1
   ) {
     const candidate = candidates[candidateIndex];
+    const candidateRank = candidateIndex + 1;
+
+    dependencies.trace?.events.push({
+      type: "candidate_started",
+      candidateRank,
+      chunkIndex: candidate.chunk_index,
+      score: candidate.score
+    });
 
     const answer =
       await dependencies.generateAnswer(
         userMessage,
         candidate.chunk
       );
+
+    dependencies.trace?.events.push({
+      type: "answer_generated",
+      candidateRank,
+      answer
+    });
 
     const verification =
       await dependencies.verifyAnswer(
@@ -102,7 +123,19 @@ export async function runOrchestrator(
         candidate.chunk
       );
 
+    dependencies.trace?.events.push({
+      type: "verification_completed",
+      candidateRank,
+      supported: verification.supported,
+      reason: verification.reason
+    });
+
     if (verification.supported) {
+      dependencies.trace?.events.push({
+        type: "candidate_accepted",
+        candidateRank
+      });
+
       return {
         action: "answer",
         question: userMessage,
@@ -110,12 +143,16 @@ export async function runOrchestrator(
         chunk: candidate.chunk,
         summary: candidate.summary,
         chunkIndex: candidate.chunk_index,
-        candidateRank: candidateIndex + 1,
+        candidateRank,
         score: candidate.score,
         reason: verification.reason
       };
     }
   }
+
+  dependencies.trace?.events.push({
+    type: "no_evidence"
+  });
 
   return {
     action: "no_evidence",
