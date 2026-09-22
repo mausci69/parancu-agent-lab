@@ -1,0 +1,26 @@
+{
+  "name": "parancu_agent_lab",
+  "version": "1.0.0",
+  "description": "ParancU API exposes ParancU retrieval as a local HTTP service and connects it to Slack.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mausci69/ParancU_API_v0.1.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/mausci69/ParancU_API_v0.1/issues"
+  },
+  "homepage": "https://github.com/mausci69/ParancU_API_v0.1#readme",
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

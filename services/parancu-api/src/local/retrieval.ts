@@ -15,7 +15,7 @@
 // The answer_focus field is no longer used for ranking or lexical matching.
 // It is kept only as an empty compatibility field until the UI is cleaned up.
 
-import type { PrepareResult, Chunk } from "./prepareCorpus";
+import type { PrepareResult, Chunk } from "./prepareCorpus.js";
 import { embedOne } from "../lib/embeddings.js";
 
 const DEFAULT_MIN_EXACT_ANCHOR_LENGTH = 2;
@@ -170,8 +170,8 @@ function escapeRegExp(value: string): string {
 function getSentenceIds(chunk: Chunk): number[] {
   return Array.isArray(chunk.sentence_ids)
     ? chunk.sentence_ids
-        .map((value) => Number(value))
-        .filter((value) => !Number.isNaN(value))
+        .map((value: number) => Number(value))
+        .filter((value: number) => !Number.isNaN(value))
     : [];
 }
 

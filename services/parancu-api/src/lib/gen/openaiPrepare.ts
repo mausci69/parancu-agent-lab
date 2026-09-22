@@ -1,15 +1,14 @@
 // /apps/mobile/src/lib/gen/openaiPrepare.ts
 
-// British English comments.
 // Direct mobile-side OpenAI metadata enrichment for EcoSearch v1 preparation.
 // The API key is loaded from local device storage, after the user provides it.
 // Flow:
 // chunk -> grounded summary + grounded guiding question + answer focus
 // -> local guiding question embedding + local answer focus embedding
 
-import type { Chunk, PrepareResult } from "../../local/prepareCorpus";
-import { loadOpenAIKey } from "../../local/openaiKeyStore";
-import { embedMany } from "../embeddings";
+import type { Chunk, PrepareResult } from "../../local/prepareCorpus.js";
+import { loadOpenAIKey } from "../../local/openaiKeyStore.js";
+import { embedMany } from "../embeddings.js";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
