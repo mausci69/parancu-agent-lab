@@ -4,6 +4,7 @@ import {
   START,
   StateGraph
 } from "@langchain/langgraph";
+import { startActiveObservation } from "@langfuse/tracing";
 
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
 import {
@@ -55,19 +56,41 @@ export function createWorkflowGraph(
   async function retrieveNode(
     state: typeof WorkflowState.State
   ) {
-    const candidates = await dependencies.retrieveCandidates(
-      state.question,
-      state.corpus,
-      5
-    );
+    return startActiveObservation(
+      "retrieve",
+      async (span) => {
+        span.update({
+          input: {
+            question: state.question
+          }
+        });
 
-    return {
-      candidates,
-      candidateIndex: 0,
-      answer: null,
-      supported: null,
-      reason: null
-    };
+        const candidates = await dependencies.retrieveCandidates(
+          state.question,
+          state.corpus,
+          5
+        );
+
+        span.update({
+          output: {
+            candidateCount: candidates.length,
+            candidates: candidates.map((candidate, index) => ({
+              rank: index + 1,
+              chunkIndex: candidate.chunk_index,
+              score: candidate.score
+            }))
+          }
+        });
+
+        return {
+          candidates,
+          candidateIndex: 0,
+          answer: null,
+          supported: null,
+          reason: null
+        };
+      }
+    );
   }
 
   async function generateNode(
@@ -81,14 +104,33 @@ export function createWorkflowGraph(
       };
     }
 
-    const answer = await dependencies.generateAnswer(
-      state.question,
-      candidate.chunk
-    );
+    return startActiveObservation(
+      "generate",
+      async (span) => {
+        span.update({
+          input: {
+            candidateRank: state.candidateIndex + 1,
+            chunkIndex: candidate.chunk_index,
+            evidence: candidate.chunk
+          }
+        });
 
-    return {
-      answer
-    };
+        const answer = await dependencies.generateAnswer(
+          state.question,
+          candidate.chunk
+        );
+
+        span.update({
+          output: {
+            answer
+          }
+        });
+
+        return {
+          answer
+        };
+      }
+    );
   }
 
   async function verifyNode(
@@ -103,27 +145,62 @@ export function createWorkflowGraph(
       };
     }
 
-    const verification = await dependencies.verifyAnswer(
-      state.question,
-      state.answer,
-      candidate.chunk
-    );
+    const answer = state.answer;
 
-    return {
-      supported: verification.supported,
-      reason: verification.reason
-    };
+    return startActiveObservation(
+      "verify",
+      async (span) => {
+        span.update({
+          input: {
+            candidateRank: state.candidateIndex + 1,
+            answer,
+            evidence: candidate.chunk
+          }
+        });
+
+        const verification = await dependencies.verifyAnswer(
+          state.question,
+          answer,
+          candidate.chunk
+        );
+
+        span.update({
+          output: verification
+        });
+
+        return {
+          supported: verification.supported,
+          reason: verification.reason
+        };
+      }
+    );
   }
 
   async function advanceNode(
     state: typeof WorkflowState.State
   ) {
-    return {
-      candidateIndex: state.candidateIndex + 1,
-      answer: null,
-      supported: null,
-      reason: null
-    };
+    return startActiveObservation(
+      "advance",
+      async (span) => {
+        const nextCandidateIndex = state.candidateIndex + 1;
+
+        span.update({
+          input: {
+            currentCandidateRank: state.candidateIndex + 1
+          },
+          output: {
+            nextCandidateRank: nextCandidateIndex + 1
+          }
+        });
+
+        return {
+          candidateIndex: nextCandidateIndex,
+          answer: null,
+          supported: null,
+          reason: null
+        };
+      }
+    );
   }
 
   function routeAfterVerification(

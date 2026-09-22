@@ -1,4 +1,6 @@
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
+import { startActiveObservation } from "@langfuse/tracing";
+
 import { workflowGraph } from "./graph";
 
 export type WorkflowResult =
@@ -22,38 +24,63 @@ export async function runWorkflow(
   question: string,
   corpus: PrepareResult
 ): Promise<WorkflowResult> {
-  const state = await workflowGraph.invoke({
-    question,
-    corpus,
-    candidates: [],
-    candidateIndex: 0,
-    answer: null,
-    supported: null,
-    reason: null
-  });
+  return startActiveObservation(
+    "parancu-workflow",
+    async (span) => {
+      span.update({
+        input: {
+          question,
+          docId: corpus.docId
+        }
+      });
 
-  const candidate = state.candidates[state.candidateIndex];
+      const state = await workflowGraph.invoke({
+        question,
+        corpus,
+        candidates: [],
+        candidateIndex: 0,
+        answer: null,
+        supported: null,
+        reason: null
+      });
 
-  if (
-    state.supported &&
-    state.answer &&
-    candidate
-  ) {
-    return {
-      action: "answer",
-      question,
-      answer: state.answer,
-      chunk: candidate.chunk,
-      summary: candidate.summary,
-      chunkIndex: candidate.chunk_index,
-      candidateRank: state.candidateIndex + 1,
-      score: candidate.score,
-      reason: state.reason ?? ""
-    };
-  }
+      const candidate =
+        state.candidates[state.candidateIndex];
 
-  return {
-    action: "no_evidence",
-    question
-  };
+      if (
+        state.supported &&
+        state.answer &&
+        candidate
+      ) {
+        const result: WorkflowResult = {
+          action: "answer",
+          question,
+          answer: state.answer,
+          chunk: candidate.chunk,
+          summary: candidate.summary,
+          chunkIndex: candidate.chunk_index,
+          candidateRank: state.candidateIndex + 1,
+          score: candidate.score,
+          reason: state.reason ?? ""
+        };
+
+        span.update({
+          output: result
+        });
+
+        return result;
+      }
+
+      const result: WorkflowResult = {
+        action: "no_evidence",
+        question
+      };
+
+      span.update({
+        output: result
+      });
+
+      return result;
+    }
+  );
 }

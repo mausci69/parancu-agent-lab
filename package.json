@@ -24,6 +24,9 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@langchain/langgraph": "^1.4.17"
+    "@langchain/langgraph": "^1.4.17",
+    "@langfuse/otel": "^5.11.1",
+    "@langfuse/tracing": "^5.11.1",
+    "@opentelemetry/sdk-node": "^0.222.0"
   }
 }
