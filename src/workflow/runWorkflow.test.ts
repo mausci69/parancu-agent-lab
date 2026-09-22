@@ -72,7 +72,13 @@ for (const rank of [1, 2, 3, 4, 5]) {
       chunkIndex: candidate.chunk_index,
       candidateRank: rank,
       score: candidate.score,
-      reason: `Checked ${candidate.chunk}`
+      reason: `Checked ${candidate.chunk}`,
+      evidence: {
+        chunkIndex: candidate.chunk_index,
+        text: candidate.chunk,
+        candidateRank: rank,
+        score: candidate.score
+      }
     });
     // Also verifies one retrieval, candidate order, evidence isolation and early stop.
     assert.deepEqual(calls, expectedCalls(candidates.slice(0, rank)));

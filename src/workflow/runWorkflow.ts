@@ -14,6 +14,12 @@ export type WorkflowResult =
       candidateRank: number;
       score: number;
       reason: string;
+      evidence: {
+        chunkIndex: number;
+        text: string;
+        candidateRank: number;
+        score: number;
+      };
     }
   | {
       action: "no_evidence";
@@ -66,7 +72,13 @@ export async function runWorkflow(
           chunkIndex: candidate.chunk_index,
           candidateRank: state.candidateIndex + 1,
           score: candidate.score,
-          reason: state.reason ?? ""
+          reason: state.reason ?? "",
+          evidence: {
+            chunkIndex: candidate.chunk_index,
+            text: candidate.chunk,
+            candidateRank: state.candidateIndex + 1,
+            score: candidate.score
+          }
         };
 
         span.update({
