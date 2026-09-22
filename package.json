@@ -4,7 +4,9 @@
   "description": "ParancU API exposes ParancU retrieval as a local HTTP service and connects it to Slack.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "workflow": "tsx src/testWorkflow.ts",
+    "test:deterministic": "tsx --test src/workflow/runWorkflow.test.ts",
+    "test": "npm run test:deterministic"
   },
   "repository": {
     "type": "git",

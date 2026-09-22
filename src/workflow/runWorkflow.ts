@@ -1,7 +1,7 @@
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
 import { startActiveObservation } from "@langfuse/tracing";
 
-import { workflowGraph } from "./graph";
+import { createWorkflowGraph, workflowGraph, type WorkflowDependencies } from "./graph";
 
 export type WorkflowResult =
   | {
@@ -22,7 +22,8 @@ export type WorkflowResult =
 
 export async function runWorkflow(
   question: string,
-  corpus: PrepareResult
+  corpus: PrepareResult,
+  dependencies?: WorkflowDependencies
 ): Promise<WorkflowResult> {
   return startActiveObservation(
     "parancu-workflow",
@@ -34,7 +35,11 @@ export async function runWorkflow(
         }
       });
 
-      const state = await workflowGraph.invoke({
+      const graph = dependencies
+        ? createWorkflowGraph(dependencies)
+        : workflowGraph;
+
+      const state = await graph.invoke({
         question,
         corpus,
         candidates: [],
