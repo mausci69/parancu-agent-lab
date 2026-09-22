@@ -6,7 +6,8 @@
   "scripts": {
     "workflow": "tsx src/testWorkflow.ts",
     "test:deterministic": "tsx --test src/workflow/runWorkflow.test.ts",
-    "test": "npm run test:deterministic"
+    "test": "npm run test:deterministic",
+    "workflow:real": "tsx src/testRealCorpus.ts"
   },
   "repository": {
     "type": "git",
