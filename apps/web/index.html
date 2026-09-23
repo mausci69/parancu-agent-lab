@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f5ef">
+  <title>ParancU — Document intelligence lab</title>
+  <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a href="/" class="brand" aria-label="ParancU Agent Lab, home"><img class="brand-symbol" src="/icon.png" alt=""><span>ParancU<span class="brand-sub">AGENT LAB</span></span></a>
+    <div class="header-actions"><span id="key-status" class="badge" role="status">Checking OpenAI…</span><button id="settings" class="button dark" type="button">Settings</button></div>
+  </header>
+  <main>
+    <section class="hero" aria-labelledby="page-title">
+      <div><p class="eyebrow">DOCUMENT INTELLIGENCE / WORKSPACE 01</p><h1 id="page-title">Answers,<br><span>backed by evidence.</span></h1><p class="hero-copy">One document. One question. One answer you can trace<br class="desktop-break"> to its supporting passage.</p></div>
+      <aside class="hero-note"><span class="note-mark" aria-hidden="true">↳</span><p>From text to answer.<br>Every piece of evidence stays visible.</p><small>ParancU retrieval · LangGraph workflow</small></aside>
+    </section>
+
+    <ol class="pipeline" aria-label="Document workflow">
+      <li id="step-document" class="active"><span class="step-number">01</span><div><strong>Document</strong><small>Upload and prepare</small></div><span class="step-arrow" aria-hidden="true">→</span></li>
+      <li id="step-retrieve"><span class="step-number">02</span><div><strong>Retrieve</strong><small>Find the relevant passages</small></div><span class="step-arrow" aria-hidden="true">→</span></li>
+      <li id="step-generate"><span class="step-number">03</span><div><strong>Generate</strong><small>Generate the answer</small></div><span class="step-arrow" aria-hidden="true">→</span></li>
+      <li id="step-verify"><span class="step-number">04</span><div><strong>Verify</strong><small>Verify its support</small></div></li>
+    </ol>
+
+    <div class="workspace">
+      <aside class="document-panel panel">
+        <div class="section-heading"><h2>Your document</h2><span class="section-index">01 / SOURCE</span></div>
+        <div class="corpus-modes" role="group" aria-label="Corpus source">
+          <button id="mode-txt" type="button" aria-pressed="true">Create from TXT</button>
+          <button id="mode-import" type="button" aria-pressed="false">Import prepared corpus</button>
+        </div>
+        <label class="file-picker" id="file-picker" for="document-file">
+          <span class="file-icon" aria-hidden="true">↥</span><strong id="upload-title">Choose a TXT file</strong><span id="upload-description">Start your search here</span><small id="upload-limit">UTF-8 · up to 1 MiB · one file</small>
+          <input id="document-file" type="file" accept=".txt,text/plain" aria-label="Choose a single TXT document">
+        </label>
+        <div id="selected-file" class="selected-file" hidden><span class="file-type">TXT</span><div><strong id="file-name"></strong><small id="file-size"></small></div></div>
+        <label class="field-label" for="language">Document language</label>
+        <select id="language"><option value="en">English</option><option value="it">Italian</option></select>
+        <button id="prepare" class="button primary full" disabled>Prepare document <span aria-hidden="true">↗</span></button>
+        <a id="export-corpus" class="button full secondary" hidden>Export corpus ↓</a>
+        <p id="corpus-origin" class="corpus-origin" hidden></p>
+        <div class="document-status" aria-live="polite"><span id="document-badge" class="badge">Waiting for a document</span><p id="document-status">Upload a document to get started.</p><button id="retry-status" class="text-button" hidden>Check status again</button></div>
+        <div id="corpus-stats" class="corpus-stats" hidden><div><strong id="chunk-count">—</strong><span>CHUNK</span></div><div><strong id="sentence-count">—</strong><span>SENTENCES</span></div></div>
+        <div class="data-note"><span aria-hidden="true">ⓘ</span><p>Files and prepared corpora are stored locally. Preparation and answers use OpenAI; workflow traces in Langfuse include text and evidence.</p></div>
+      </aside>
+
+      <div class="research-panel">
+        <section class="question-panel panel" aria-labelledby="question-title">
+          <div class="section-heading"><h2 id="question-title">Ask the document</h2><span class="section-index">02 / ASK</span></div>
+          <form id="question-form">
+            <label class="sr-only" for="question">Your question</label>
+            <textarea id="question" rows="3" maxlength="4000" placeholder="What information do you want to find?" disabled required></textarea>
+            <div class="question-actions"><small id="question-hint">You can ask a question once preparation is complete.</small><button id="ask" type="submit" class="button dark" disabled>Find an answer <span aria-hidden="true">→</span></button></div>
+          </form>
+        </section>
+
+        <div id="error" class="error-notice" role="alert" hidden></div>
+
+        <section class="answer-panel panel" aria-labelledby="answer-title" aria-busy="false" id="answer-panel">
+          <div class="section-heading"><h2 id="answer-title">Your answer</h2><span id="answer-badge" class="badge">READY TO EXPLORE</span></div>
+          <div id="answer-placeholder" class="answer-placeholder"><span class="empty-mark" aria-hidden="true">“</span><p>The best answers<br>show where they come from.</p><small>Your verified answer and the retrieved passages<br>will appear here after you ask a question.</small></div>
+          <div id="answer-content" hidden><p id="asked-question" class="asked-question"></p><p id="answer-text" class="answer-text"></p><a id="citation" class="citation" hidden></a><p id="verification" class="verification" hidden></p></div>
+          <p id="activity" class="activity" role="status" hidden></p>
+        </section>
+
+        <section id="evidence-panel" class="evidence-panel" hidden aria-labelledby="evidence-title">
+          <div class="section-heading"><h2 id="evidence-title">Explore the evidence <span id="evidence-count" class="count"></span></h2><span class="section-index">03 / INSPECT</span></div>
+          <p class="evidence-explainer">Ranked by ParancU. The retrieval score reflects ranking, not the probability that an answer is correct.</p>
+          <div id="evidence-list"></div>
+        </section>
+      </div>
+    </div>
+    <footer><span>PARANCU AGENT LAB</span><p>Read. Ask. Verify.</p><span>One document at a time.</span></footer>
+  </main>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <form id="key-form" autocomplete="off">
+      <div class="section-heading"><h2 id="settings-title">OpenAI settings</h2><button id="close-settings" type="button" class="text-button" aria-label="Close settings">Close</button></div>
+      <p id="settings-status" role="status"></p>
+      <label class="field-label" for="openai-key">OpenAI API key</label>
+      <input id="openai-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="512" placeholder="sk-…" aria-describedby="key-help">
+      <p id="key-help" class="settings-help">Your key is held in server memory for this local workspace. It is never saved to disk or browser storage. Closing this dialog clears the input field. Readiness means a key is configured; it does not test your account.</p>
+      <div id="settings-error" class="error-notice" role="alert" hidden></div>
+      <div class="settings-actions"><button id="save-key" class="button primary" type="submit">Use key</button><button id="remove-key" class="button secondary" type="button">Remove key</button></div>
+      <p class="settings-help">Only the key you enter here is used. Remove key disables TXT preparation and questions until you enter a new key. Import and export remain available. Requests already sent may still finish. Stopping the server clears the session key.</p>
+    </form>
+  </dialog>
+</body>
+</html>

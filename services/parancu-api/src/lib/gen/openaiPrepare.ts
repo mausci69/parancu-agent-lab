@@ -7,10 +7,9 @@
 // -> local guiding question embedding + local answer focus embedding
 
 import type { Chunk, PrepareResult } from "../../local/prepareCorpus.js";
-import { loadOpenAIKey } from "../../local/openaiKeyStore.js";
+import { checkOpenAIContent, requestOpenAI } from "../../local/openaiRequest.js";
 import { embedMany } from "../embeddings.js";
 
-const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 
 const OPENAI_MODEL =
   process.env.EXPO_PUBLIC_OPENAI_MODEL ?? "gpt-5.4-mini";
@@ -33,18 +32,6 @@ type ChunkMetadata = {
 };
 
 console.log("OPENAI MODEL:", OPENAI_MODEL);
-
-async function getOpenAIKey(): Promise<string> {
-  const key = await loadOpenAIKey();
-
-  if (!key) {
-    throw new Error(
-      "Missing OpenAI API key. Add your key in Manage corpus before preparing a corpus."
-    );
-  }
-
-  return key;
-}
 
 function extractTextFromResponse(payload: any): string {
   if (
@@ -208,20 +195,9 @@ function parseChunkMetadata(
 
 async function callOpenAIText(
   system: string,
-  user: string,
-  errorLabel: string
+  user: string
 ): Promise<string> {
-  const apiKey = await getOpenAIKey();
-
-  const response = await fetch(
-    OPENAI_RESPONSES_URL,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
+  const payload = await requestOpenAI({
         model: OPENAI_MODEL,
         input: [
           {
@@ -243,19 +219,7 @@ async function callOpenAIText(
             ],
           },
         ],
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-
-    throw new Error(
-      `${errorLabel}: HTTP ${response.status} ${errorText}`
-    );
-  }
-
-  const payload = await response.json();
+      });
 
   return extractTextFromResponse(payload);
 }
@@ -327,8 +291,7 @@ async function generateChunkMetadata(
 
   const text = await callOpenAIText(
     system,
-    user,
-    "OpenAI chunk metadata generation failed"
+    user
   );
 
   return parseChunkMetadata(
@@ -358,6 +321,7 @@ export async function enrichPreparedCorpusWithOpenAI(
         chunk.text,
         corpusLanguage
       );
+    await checkOpenAIContent(metadata);
 
     const summary = metadata.summary;
     const guidingQuestion =

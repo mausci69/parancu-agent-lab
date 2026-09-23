@@ -5,9 +5,11 @@
   "main": "index.js",
   "scripts": {
     "workflow": "tsx src/testWorkflow.ts",
-    "test:deterministic": "tsx --test src/workflow/runWorkflow.test.ts",
+    "test:deterministic": "tsx --test src/workflow/runWorkflow.test.ts src/web/web.test.ts src/verifier/evidenceVerifier.test.ts",
     "test": "npm run test:deterministic",
-    "workflow:real": "tsx src/testRealCorpus.ts"
+    "workflow:real": "tsx src/testRealCorpus.ts",
+    "web:local": "tsx src/web/server.ts",
+    "typecheck": "tsc --noEmit"
   },
   "repository": {
     "type": "git",
