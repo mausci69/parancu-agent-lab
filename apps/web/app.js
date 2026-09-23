@@ -10,6 +10,7 @@ let pollVersion = 0;
 let mode = "txt";
 let keyState = { ready: false, source: "none" };
 let settingsBusy = false;
+let keyStatusVersion = 0;
 
 function showKeyStatus(status) {
   keyState = status;
@@ -23,8 +24,14 @@ function showKeyStatus(status) {
 }
 
 async function refreshKeyStatus() {
-  try { showKeyStatus(await api("/api/settings/openai")); }
-  catch { showKeyStatus({ ready: false, source: "none" }); }
+  if (settingsBusy) return;
+  const version = ++keyStatusVersion;
+  try {
+    const status = await api("/api/settings/openai");
+    if (version === keyStatusVersion) showKeyStatus(status);
+  } catch {
+    if (version === keyStatusVersion) showKeyStatus({ ready: false, source: "none" });
+  }
 }
 
 byId("settings").addEventListener("click", () => {
@@ -41,6 +48,8 @@ window.addEventListener("focus", () => { void refreshKeyStatus(); });
 async function updateKey(remove) {
   if (settingsBusy) return;
   settingsBusy = true;
+  // A status read started before this mutation must not overwrite its result.
+  ++keyStatusVersion;
   byId("save-key").disabled = true;
   byId("remove-key").disabled = true;
   byId("settings-error").hidden = true;
@@ -78,6 +87,7 @@ function updateModeAppearance() {
 }
 
 function selectMode(next) {
+  if (next === mode) return;
   if (preparingRequest || asking || corpus?.status === "preparing") return;
   mode = next;
   file = null; corpus = null; ++pollVersion;
@@ -124,12 +134,18 @@ function controls() {
   byId("language").disabled = locked || corpus?.status === "ready";
   byId("prepare").disabled = !file || locked || corpus?.status === "ready" || (mode === "txt" && !keyState.ready);
   byId("prepare").textContent = preparing ? (mode === "import" ? "Importing…" : "Preparing…") : mode === "import" ? "Import corpus ↗" : "Prepare document ↗";
-  byId("question").disabled = corpus?.status !== "ready" || asking || !keyState.ready;
-  byId("ask").disabled = corpus?.status !== "ready" || asking || !keyState.ready || !byId("question").value.trim();
+  const canAsk = corpus?.status === "ready" && keyState.ready && !asking;
+  byId("question").disabled = !canAsk;
+  byId("ask").disabled = !canAsk;
   byId("ask").textContent = asking ? "Finding an answer…" : "Find an answer →";
   byId("question-hint").textContent = !keyState.ready ? "Add an OpenAI key in Settings to ask questions." : corpus?.status === "ready"
     ? "A specific question helps find the right evidence."
     : "You can ask a question once preparation is complete.";
+  if (corpus?.status === "ready") {
+    byId("document-status").textContent = keyState.ready
+      ? "Corpus loaded and ready. Ask questions without preparing it again."
+      : "Corpus loaded and ready. Export is available. Add an OpenAI key in Settings to ask questions.";
+  }
 }
 
 function pipeline(mode) {

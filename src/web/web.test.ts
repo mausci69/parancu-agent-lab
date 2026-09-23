@@ -485,6 +485,136 @@ test("JSON-escaped credentials in verifier output never become a returned reason
     return true;
   });
 });
+test("UI imports without a key and preserves the visible corpus across active-tab clicks and key changes", async t => {
+  const store = new CorpusStore(await tempDirectory(t), {
+    prepare: () => { throw new Error("Import must not prepare"); },
+    enrich: async () => { throw new Error("Import must not enrich"); }
+  }, noLog);
+  const base = await startServer(t, store, service(), new KeyManager());
+  const html = await readFile(path.join(webDirectory, "index.html"), "utf8");
+  const nodes = new Map<string, any>();
+  // Only actual HTML IDs exist: unlike the previous UI stub, missing nodes fail.
+  for (const match of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
+    const listeners = new Map<string, (...args: any[]) => unknown>();
+    nodes.set(match[1], {
+      value: match[1] === "language" ? "en" : "", files: [], textContent: "",
+      hidden: /\bhidden\b/.test(match[0]), disabled: /\bdisabled\b/.test(match[0]),
+      classList: { toggle() {}, add() {} }, setAttribute() {}, replaceChildren() {}, focus() {},
+      showModal() {}, close() { listeners.get("close")?.(); },
+      addEventListener(name: string, listener: (...args: any[]) => unknown) { listeners.set(name, listener); },
+      fire(name: string) { return listeners.get(name)?.({ preventDefault() {} }); }
+    });
+  }
+  const node = (id: string) => { assert.ok(nodes.has(id), `HTML element ${id} exists`); return nodes.get(id); };
+  const storage = new Map<string, string>();
+  const requests: string[] = [];
+  let delayedStatus: { captured: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>; done: ReturnType<typeof deferred> } | undefined;
+  const context = vm.createContext({
+    document: { getElementById: (id: string) => nodes.get(id) ?? null },
+    window: { addEventListener() {} }, TextDecoder,
+    localStorage: { getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
+    fetch: async (url: string, options?: RequestInit) => {
+      requests.push(`${options?.method ?? "GET"} ${url}`);
+      const delay = url === "/api/settings/openai" && !options?.method ? delayedStatus : undefined;
+      const response = await fetch(base + url, options);
+      if (!delay) return response;
+      const data = await response.json();
+      delay.captured.resolve();
+      await delay.release.promise;
+      return { ok: response.ok, json: async () => { delay.done.resolve(); return data; } };
+    }
+  });
+  vm.runInContext(await readFile(path.join(webDirectory, "app.js"), "utf8"), context);
+  await vm.runInContext("refreshKeyStatus()", context);
+  assert.equal(node("key-status").textContent, "OpenAI key missing");
+  assert.equal(node("ask").disabled, true);
+  node("document-file").files = [{ name: "example.txt", size: 10 }];
+  node("document-file").fire("change");
+  assert.equal(node("prepare").disabled, true, "TXT preparation needs a key");
+  assert.equal(node("mode-import").disabled, false);
+  node("mode-import").fire("click");
+  const bytes = Buffer.from(JSON.stringify(enriched()));
+  node("document-file").files = [{ name: "Atlas.prepared.json", size: bytes.length,
+    arrayBuffer: async () => bytes }];
+  node("document-file").fire("change");
+  assert.equal(node("prepare").disabled, false, "local import needs no key");
+  await node("prepare").fire("click");
+  const id = storage.get("parancu.web.corpusId");
+  assert.ok(id);
+  await vm.runInContext(`poll(${JSON.stringify(id)}, pollVersion)`, context);
+  const assertLoaded = () => {
+    assert.equal(vm.runInContext("corpus.id", context), id);
+    assert.equal(storage.get("parancu.web.corpusId"), id);
+    assert.equal(node("selected-file").hidden, false);
+    assert.equal(node("file-name").textContent, "Atlas.txt");
+    assert.equal(node("document-badge").textContent, "Document ready");
+    assert.equal(node("corpus-stats").hidden, false);
+    assert.equal(node("chunk-count").textContent, String(enriched().chunks.length));
+    assert.equal(node("sentence-count").textContent, String(enriched().sentences.length));
+    assert.equal(node("corpus-origin").hidden, false);
+    assert.match(node("corpus-origin").textContent, /Imported/);
+    assert.equal(node("export-corpus").hidden, false);
+    assert.equal(node("export-corpus").href, `/api/corpora/${id}/export`);
+    assert.equal(node("error").hidden, true);
+  };
+  assertLoaded();
+  node("mode-import").fire("click");
+  assertLoaded();
+  assert.match(node("document-status").textContent, /loaded.*Export.*OpenAI key/);
+  assert.equal(node("question").disabled, true);
+  assert.equal(node("ask").disabled, true);
+  assert.equal((await fetch(base + node("export-corpus").href)).status, 200);
+  const finishSettings = async () => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      if (!vm.runInContext("settingsBusy", context)) return;
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.fail("Settings request did not finish");
+  };
+  // Opening Settings starts a GET. Hold its old 'missing' response until PUT succeeds.
+  delayedStatus = { captured: deferred(), release: deferred(), done: deferred() };
+  node("settings").fire("click");
+  await delayedStatus.captured.promise;
+  node("openai-key").value = sessionKey;
+  node("key-form").fire("submit");
+  await finishSettings();
+  delayedStatus.release.resolve();
+  await delayedStatus.done.promise;
+  await new Promise(resolve => setImmediate(resolve));
+  delayedStatus = undefined;
+  assertLoaded();
+  assert.equal(node("question").value, "", "readiness must not require prefilled text");
+  assert.equal(node("key-status").textContent, "OpenAI ready");
+  assert.equal(node("question").disabled, false);
+  assert.equal(node("ask").disabled, false);
+  node("settings").fire("click");
+  node("remove-key").fire("click");
+  await finishSettings();
+  assertLoaded();
+  assert.equal(node("key-status").textContent, "OpenAI key missing");
+  assert.equal(node("question").disabled, true);
+  assert.equal(node("ask").disabled, true);
+  assert.match(node("document-status").textContent, /loaded.*Export.*OpenAI key/);
+  node("openai-key").value = sessionKey;
+  node("key-form").fire("submit");
+  await finishSettings();
+  assertLoaded();
+  assert.equal(node("question").disabled, false);
+  assert.equal(node("ask").disabled, false);
+  assert.equal(requests.filter(r => r === "POST /api/corpora/import").length, 1);
+  assert.ok(!requests.includes("POST /api/corpora"));
+  assert.ok(!requests.includes("POST /api/questions"));
+  // Switching explicitly to a new TXT verifies its independent credential gate.
+  node("mode-txt").fire("click");
+  node("document-file").files = [{ name: "example.txt", size: 10 }];
+  node("document-file").fire("change");
+  assert.equal(node("prepare").disabled, false);
+  node("remove-key").fire("click");
+  await finishSettings();
+  assert.equal(node("prepare").disabled, true);
+});
+
 test("Settings UI reflects server key state, clears input, closes on Use key, and disables work after removal", async t => {
   environmentPresent(t);
   const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
