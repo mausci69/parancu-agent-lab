@@ -14,7 +14,14 @@ src/testWorkflow.ts
                                └─ END (exhausted)
 ```
 
-`src/workflow/graph.ts` calls ParancU's `retrieveCandidatesFromPrepared(question, corpus, 5)` directly in process. No HTTP server is required for this path. Retrieval runs once; candidates are tried in rank order, one at a time. Each generation call receives only the question and current candidate's chunk. The existing OpenAI verifier checks the generated answer against that same chunk.
+`src/workflow/graph.ts` calls ParancU's `retrieveCandidatesFromPrepared(question, corpus, 5)` directly in process. No HTTP server is required for this path. The workflow remains Retrieve → Generate → Verify. Retrieval runs once; candidates are evaluated in rank order, one at a time. Each generation call receives only the question and current candidate's chunk. Multi-chunk evidence composition is not implemented yet.
+
+The verifier requires both checks to pass:
+
+1. **Evidence support:** the answer must be supported by the retrieved evidence in the current candidate's chunk.
+2. **Question alignment:** the answer must actually answer the original user question without substituting concepts, answering a nearby question, or treating distinct terms as equivalent.
+
+An answer that accurately summarizes a retrieved chunk but changes the meaning of the question is rejected.
 
 State contains `question`, `corpus`, `candidates`, `candidateIndex`, `answer`, `supported`, and `reason`. `src/workflow/runWorkflow.ts` returns either an accepted answer with structured `evidence` (`chunkIndex`, `text`, `candidateRank`, and `score`) and verification reason, or `no_evidence` without evidence when retrieval is empty or all candidates are rejected. Explicit retrieval, generation and verification errors propagate as errors. Empty model-output handling is outside this hardening step and remains unchanged. LLM verification is a safeguard, not a proof of grounding.
 
