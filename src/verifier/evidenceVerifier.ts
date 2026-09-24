@@ -1,5 +1,6 @@
 import { checkOpenAIContent, requestOpenAI } from "../../services/parancu-api/src/local/openaiRequest";
 import type { EvidenceContext } from "../workflow/state";
+import { startActiveObservation } from "@langfuse/tracing";
 
 
 const OPENAI_MODEL =
@@ -19,16 +20,41 @@ export type VerifierDecision = {
   reason: string;
 };
 
+/** Whitespace only: preserve case, punctuation and every non-whitespace character. */
+function normalizeQuoteWhitespace(text: string): string {
+  return text.replace(/\s+/gu, " ").trim();
+}
+
 export function deriveEvidenceVerification(decision: VerifierDecision, evidence: string): EvidenceVerification {
-  // Exact substring matching: no normalization, fuzzy matching or answer-text lookup.
-  const evidenceSupported = decision.claims.length > 0 && decision.claims.every(claim =>
-    claim.supported === true && claim.evidenceQuote.trim().length > 0 && evidence.includes(claim.evidenceQuote));
-  const supported = evidenceSupported
-    && decision.questionCovered === true
-    && decision.conceptConflation === false
-    && decision.missingConcepts.length === 0;
-  return { supported, reason: decision.reason,
-    ...(decision.missingConcepts.length ? { missingConcepts: decision.missingConcepts } : {}) };
+  // Production callers reach this only after schema and credential-content validation.
+  return startActiveObservation("verifier-decision", span => {
+    span.update({ input: { structuredVerdict: decision } });
+    // Exact substring matching after whitespace normalization; no fuzzy or semantic matching.
+    const normalizedEvidence = normalizeQuoteWhitespace(evidence);
+    const claims = decision.claims.map((claim, index) => {
+      const quote = normalizeQuoteWhitespace(claim.evidenceQuote);
+      return { index, supported: claim.supported,
+        quoteValid: quote.length > 0 && normalizedEvidence.includes(quote) };
+    });
+    const evidenceSupported = claims.length > 0 && claims.every(claim => claim.supported === true && claim.quoteValid);
+    const supported = evidenceSupported
+      && decision.questionCovered === true
+      && decision.conceptConflation === false
+      && decision.missingConcepts.length === 0;
+    const failedChecks = [
+      ...(!claims.length ? ["empty_claims"] : []),
+      ...claims.flatMap(c => [
+        ...(c.supported !== true ? [`claim_${c.index}_unsupported`] : []),
+        ...(!c.quoteValid ? [`claim_${c.index}_invalid_quote`] : [])
+      ]),
+      ...(decision.questionCovered !== true ? ["question_not_covered"] : []),
+      ...(decision.conceptConflation !== false ? ["concept_conflation"] : []),
+      ...(decision.missingConcepts.length ? ["missing_concepts"] : [])
+    ];
+    span.update({ output: { quoteChecks: claims, evidenceSupported, supported, failedChecks } });
+    return { supported, reason: decision.reason,
+      ...(decision.missingConcepts.length ? { missingConcepts: decision.missingConcepts } : {}) };
+  });
 }
 
 function extractTextFromResponse(payload: any): string {
@@ -142,8 +168,12 @@ export async function verifyEvidence(
     "Check whether the proposed answer actually answers the user's question using information contained in the supplied evidence.",
     "An answer saying that the information is missing, unknown, unspecified, unavailable, or not present is NOT a supported answer.",
     "Return claim-level attribution plus questionCovered, conceptConflation, and missingConcepts. Do not output supported or evidenceSupported at the top level; TypeScript alone computes them.",
-    "Break the entire answer into ALL material factual claims, including qualifications, relationships and comparisons. Do not omit unsupported claims or only list claims that are easy to support. Return a non-empty claims array for a factual answer.",
+    "Break the entire answer into ALL material factual claims, including qualifications and substantive factual relationships or comparisons. Do not omit unsupported claims or only list claims that are easy to support. Return a non-empty claims array for a factual answer.",
+    "Distinguish factual propositions from discourse markers. Phrases such as 'by contrast', 'whereas', 'while', 'unlike', and 'in comparison' are not standalone factual claims merely because they connect a comparison. Extract and attribute the factual propositions on each side independently; the connective itself needs no separate evidenceQuote. When supported descriptions establish the requested role distinction, assess their combined coverage through questionCovered.",
+    "Do not discard factual meaning carried by comparative language: superiority ('more accurate than'), exclusivity, negation, causation, temporal relationships, and absolutes ('always finds the correct document') are material claims requiring evidence. In 'Unlike X, Y does Z', any implied claim that X does not do Z also requires support. If such a relation is unsupported, mark it supported=false with evidenceQuote=\"\", even when its individual terms occur in the evidence. Discourse markers never exempt factual claims from grounding or concept-conflation checks.",
     "For each claim return claim, supported (boolean), and evidenceQuote. A supported claim requires a short exact quote copied verbatim from the supplied Evidence text that substantiates the entire claim. Preserve the quote's whitespace and punctuation. Never quote the question, answer, instructions or provenance labels as evidence.",
+    "Copy evidenceQuote character-for-character from one contiguous supporting substring of the supplied Evidence. Do not add or remove punctuation, insert quotation marks, change capitalization, paraphrase, add ellipses unless they literally occur in that substring, clean up OCR/text artifacts, or normalize any characters or whitespace. Copy the source, not your reconstruction of it.",
+    "JSON string delimiters and required JSON escaping are serialization only: after JSON decoding, evidenceQuote must still equal the copied source substring character-for-character. Do not include decorative quotation marks inside the string. Before returning it, check the quote against the source. If you cannot identify a literal supporting substring, return supported=false and evidenceQuote=\"\" for that claim, even if you believe the claim is semantically correct.",
     "Faithful paraphrases count as supported: the answer need not repeat the evidence wording. Determine semantic support first, then copy its supporting quote exactly. Do not treat paraphrasing as concept conflation.",
     "Unsupported claims must have supported=false and evidenceQuote=\"\". Never invent, paraphrase or stitch together an evidenceQuote. Split compound claims when they need separate quotes.",
     "questionCovered: the answer must address the original question, preserving its key concepts, entities, scope, and requested relationship, including all requested sides of a comparison.",
@@ -207,11 +237,6 @@ export async function verifyEvidence(
           parsed.missingConcepts.length > 3 || parsed.missingConcepts.some((c: unknown) =>
             typeof c !== "string" || !c.trim() || c.length > 160))) {
       throw new Error("Invalid verifier verdict.");
-    }
-    if (aliasesBookAndDomain(parsed.reason)) {
-      return deriveEvidenceVerification({ ...parsed, conceptConflation: true,
-        missingConcepts: conceptDiagnostic().missingConcepts ?? parsed.missingConcepts,
-        reason: "Question alignment failed: the verifier explanation conflates closed-book with closed-domain." }, evidence);
     }
     return deriveEvidenceVerification({ claims: parsed.claims, questionCovered: parsed.questionCovered,
       conceptConflation: parsed.conceptConflation, missingConcepts: parsed.missingConcepts.map((c: string) => c.trim()), reason: parsed.reason }, evidence);

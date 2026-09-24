@@ -27,6 +27,146 @@ const candidate = (text: string, index = 0): RetrieveResult => ({
 const attributed = (supported: boolean, quote = evidence) => [{ claim: "Test material claim", supported, evidenceQuote: supported ? quote : "" }];
 const withKey = <T>(work: () => T) => withOpenAIKey(() => "sk-test-verifier-12345678901234567890", work);
 
+const roleQuestion = "What role does the question classifier play, and how does that differ from the role of the retriever in a modern QA system?";
+const classifierQuote = "The question classifier determines the type of question and the type of answer.";
+const retrieverQuote = "The retriever is aimed at retrieving relevant documents related to the question.";
+const roleEvidence = `${classifierQuote}\n${retrieverQuote}`;
+
+const recoveredRoleAnswer = "The question classifier determines the type of question and the type of answer. In contrast, the retriever’s role is to retrieve relevant documents related to the question.";
+const positiveRoleReason = "The answer addresses both requested roles and distinguishes them correctly: the question classifier identifies the question/answer type, while the retriever fetches relevant documents. Both factual claims are directly supported by the evidence.";
+const sourceClassifier = "As of 2001, question-answering systems typically included a\u00a0question classifier\u00a0module that determined the type of question and the type of answer.[7]";
+const sourceRetriever = "The retriever is aimed at retrieving relevant documents related to a given question, while the reader is used to infer the answer from the retrieved documents.";
+
+for (const [label, quote, expected] of [
+  ["exact substring", "module that determined the type of question and the type of answer", true],
+  ["inserted quotation marks", sourceClassifier.replace("question classifier", 'question classifier"'), false],
+  ["removed punctuation", sourceClassifier.replace("2001,", "2001"), false],
+  ["added punctuation", sourceClassifier.replace("module", "module:"), false],
+  ["changed capitalization", sourceClassifier.replace("question classifier", "Question Classifier"), false],
+  ["paraphrase instead of literal quote", "The classifier identifies question and answer types.", false],
+  ["literal live classifier quote", sourceClassifier, true]
+] as const) {
+  test(`literal quote copying: ${label}`, async t => {
+    t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ output_text: JSON.stringify({
+      claims: [{ claim: classifierQuote, supported: true, evidenceQuote: quote }],
+      questionCovered: true, conceptConflation: false, missingConcepts: [], reason: "The claim is supported."
+    }) })));
+    assert.equal((await withKey(() => verifyEvidence("What does the question classifier do?",
+      classifierQuote, sourceClassifier))).supported, expected);
+  });
+}
+
+test("production quote instructions require character-for-character source copying", async t => {
+  t.mock.method(globalThis, "fetch", async (_url: unknown, options: RequestInit) => {
+    const system = JSON.parse(String(options.body)).input[0].content[0].text;
+    assert.match(system, /Copy evidenceQuote character-for-character from one contiguous supporting substring/);
+    assert.match(system, /Do not add or remove punctuation, insert quotation marks, change capitalization, paraphrase/);
+    assert.match(system, /ellipses unless they literally occur/);
+    assert.match(system, /clean up OCR\/text artifacts, or normalize any characters or whitespace/);
+    assert.match(system, /after JSON decoding, evidenceQuote must still equal the copied source substring character-for-character/);
+    assert.match(system, /cannot identify a literal supporting substring, return supported=false and evidenceQuote=""/);
+    return new Response(JSON.stringify({ output_text: JSON.stringify({
+      claims: [{ claim: classifierQuote, supported: false, evidenceQuote: "" }],
+      questionCovered: true, conceptConflation: false, missingConcepts: [], reason: "No literal supporting substring identified."
+    }) }));
+  });
+  assert.equal((await withKey(() => verifyEvidence(roleQuestion, classifierQuote, sourceClassifier))).supported, false);
+});
+
+for (const [label, source, quote, expected] of [
+  ["non-breaking spaces", "The\u00a0question\u202fclassifier determines the type of question.", "The question classifier determines the type of question.", true],
+  ["line breaks, tabs and repeated whitespace", "  The\r\nquestion\tclassifier   determines the type of question.\n", " The question classifier determines the type of question. ", true],
+  ["live classifier sentence", sourceClassifier, "As of 2001, question-answering systems typically included a question classifier module that determined the type of question and the type of answer.[7]", true],
+  ["altered wording", classifierQuote, classifierQuote.replace("determines", "guarantees"), false],
+  ["missing factual content inside quote", classifierQuote, "The question classifier determines the type of answer.", false],
+  ["added factual content", classifierQuote, "The question classifier always determines the type of question and the type of answer.", false],
+  ["semantic paraphrase is not an exact quote", classifierQuote, "The classifier identifies question and answer types.", false],
+  ["case remains significant", classifierQuote, classifierQuote.toLowerCase(), false],
+  ["punctuation remains significant", classifierQuote, classifierQuote.replace(".", "!"), false],
+  ["whitespace-only quote", classifierQuote, "\u00a0\t\r\n ", false]
+] as const) {
+  test(`normalized evidence quote: ${label}`, async t => {
+    t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ output_text: JSON.stringify({
+      claims: [{ claim: classifierQuote, supported: true, evidenceQuote: quote }],
+      questionCovered: true, conceptConflation: false, missingConcepts: [], reason: "Semantic support confirmed."
+    }) })));
+    const result = await withKey(() => verifyEvidence("What does the question classifier do?", classifierQuote, source));
+    assert.equal(result.supported, expected);
+  });
+}
+
+for (const guard of ["none", "unsupported claim", "invalid quote", "question uncovered", "conflation", "missing concept"] as const) {
+  test(`exact recovered role answer with positive reason: ${guard}`, async t => {
+    const claims = [
+      { claim: "The classifier determines question and answer type.", supported: true,
+        evidenceQuote: "question classifier module that determined the type of question and the type of answer" },
+      { claim: "The retriever retrieves documents relevant to the question.", supported: true,
+        evidenceQuote: "The retriever is aimed at retrieving relevant documents related to a given question" }
+    ];
+    if (guard === "unsupported claim") { claims[0].supported = false; claims[0].evidenceQuote = ""; }
+    if (guard === "invalid quote") claims[0].evidenceQuote = claims[0].evidenceQuote.replace("determined", "guaranteed");
+    t.mock.method(globalThis, "fetch", async (_url: unknown, options: RequestInit) => {
+      const prompt = JSON.parse(String(options.body)).input[1].content[0].text;
+      assert.ok(prompt.includes(recoveredRoleAnswer));
+      return new Response(JSON.stringify({ output_text: JSON.stringify({
+        claims, questionCovered: guard !== "question uncovered", conceptConflation: guard === "conflation",
+        missingConcepts: guard === "missing concept" ? ["retriever role"] : [], reason: positiveRoleReason,
+        supported: false // The model's top-level boolean is irrelevant.
+      }) }));
+    });
+    const result = await withKey(() => verifyEvidence(roleQuestion, recoveredRoleAnswer,
+      `Chunk 37:\n${sourceClassifier}\n\nChunk 40:\n${sourceRetriever}`, {
+        evidenceSet: [
+          { chunkIndex: 37, candidateRank: 1, score: 0.9, text: sourceClassifier },
+          { chunkIndex: 40, candidateRank: 2, score: 0.8, text: sourceRetriever }
+        ], missingConcepts: ["retriever role"]
+      }));
+    assert.equal(result.supported, guard === "none");
+    assert.equal(result.reason, positiveRoleReason, "reason is never used or rewritten to derive the verdict");
+  });
+}
+
+for (const [label, answer, expected] of [
+  ["by contrast", "The question classifier determines the type of question and the type of answer. The retriever, by contrast, retrieves relevant documents related to the question.", true],
+  ["whereas", "The question classifier determines the question and answer type, whereas the retriever retrieves relevant documents.", true],
+  ["while", "While the classifier identifies the type of question and answer, the retriever retrieves relevant documents.", true],
+  ["unsupported superiority", "The classifier is more accurate than the retriever.", false],
+  ["unsupported absolute", "Unlike the classifier, the retriever always finds the correct document.", false]
+] as const) {
+  test(`role comparison: ${label} ${expected ? "passes" : "fails"} claim attribution`, async t => {
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async (_url: unknown, options: RequestInit) => {
+      calls++;
+      const input = JSON.parse(String(options.body)).input;
+      const system = input[0].content[0].text;
+      const prompt = input[1].content[0].text;
+      // Check the actual production prompt; mock the model's semantic decisions only.
+      assert.match(system, /not standalone factual claims merely because they connect a comparison/);
+      assert.match(system, /factual propositions on each side independently/);
+      assert.match(system, /connective itself needs no separate evidenceQuote/);
+      assert.match(system, /superiority.*exclusivity.*negation.*absolutes/);
+      assert.match(system, /any implied claim that X does not do Z also requires support/);
+      assert.ok(prompt.includes(roleQuestion) && prompt.includes(answer) && prompt.includes(roleEvidence));
+      const claims = expected ? [
+        { claim: "The classifier identifies the question and answer type.", supported: true, evidenceQuote: classifierQuote },
+        { claim: "The retriever retrieves relevant documents related to the question.", supported: true, evidenceQuote: retrieverQuote }
+      ] : [{ claim: answer, supported: false, evidenceQuote: "" }];
+      return new Response(JSON.stringify({ output_text: JSON.stringify({
+        claims, questionCovered: true, conceptConflation: false, missingConcepts: [],
+        reason: expected ? "The two supported roles establish the comparison." : "The factual comparison or absolute is not supported."
+      }) }));
+    });
+    const result = await withKey(() => verifyEvidence(roleQuestion, answer, roleEvidence, {
+      evidenceSet: [
+        { chunkIndex: 0, candidateRank: 1, score: 0.9, text: classifierQuote },
+        { chunkIndex: 1, candidateRank: 2, score: 0.8, text: retrieverQuote }
+      ], missingConcepts: ["retriever role"]
+    }));
+    assert.equal(result.supported, expected);
+    assert.equal(calls, 1);
+  });
+}
+
 // Fixed copies of the relevant prepared chunks; tests never read the live corpus.
 const comparisonEvidenceSet = [
   { chunkIndex: 6, candidateRank: 1, score: 0.9,
@@ -104,7 +244,7 @@ test("closed-book-only coverage retains the missing open-domain diagnostic for r
 test("fabricated, empty, altered and answer-only quotes cannot support a claim", async t => {
   const mock = t.mock.method(globalThis, "fetch", async () => new Response());
   for (const evidenceQuote of ["Invented evidence that is absent.", "", " ",
-    "Closed-book question answering is when a system has memorized some facts during training", // Changes the source's NBSP.
+    "Closed-book question answering is when a system has memorized all facts during training", // Changes factual wording, not just whitespace.
     liveComparisonAnswer]) {
     mock.mock.mockImplementation(async () => new Response(JSON.stringify({ output_text: JSON.stringify({
       claims: [{ claim: "A claim", supported: true, evidenceQuote }], questionCovered: true,
@@ -457,7 +597,7 @@ test("formatted aliases and substitutions are rejected independently of model ap
   assert.equal(calls, 0);
 });
 
-test("a model explanation that aliases these concepts cannot approve an otherwise unflagged answer", async t => {
+test("model reason text cannot override valid structured sub-decisions", async t => {
   t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
     output_text: JSON.stringify({
       claims: attributed(true), questionCovered: true, conceptConflation: false, missingConcepts: [],
@@ -465,8 +605,8 @@ test("a model explanation that aliases these concepts cannot approve an otherwis
     })
   })));
   const verdict = await withKey(() => verifyEvidence(question, "Closed-book QA uses internal knowledge.", evidence));
-  assert.equal(verdict.supported, false);
-  assert.match(verdict.reason, /explanation conflates/);
+  assert.equal(verdict.supported, true);
+  assert.match(verdict.reason, /It contrasts/);
 });
 
 test("missing or malformed alignment verdicts remain operational errors, never approval", async t => {
