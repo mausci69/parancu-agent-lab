@@ -12,18 +12,24 @@ src/testWorkflow.ts
                    ↑           |
                    └─ advance ←┘ (rejected, candidates remain)
                                └─ END (exhausted)
+
+On a coverage/concept diagnostic, once per workflow:
+  verify → recover (new ParancU query → generate with two chunks → verify)
+         → END if supported, otherwise resume advance/exhaustion
 ```
 
-`src/workflow/graph.ts` calls ParancU's `retrieveCandidatesFromPrepared(question, corpus, 5)` directly in process. No HTTP server is required for this path. The workflow remains Retrieve → Generate → Verify. Retrieval runs once; candidates are evaluated in rank order, one at a time. Each generation call receives only the question and current candidate's chunk. Multi-chunk evidence composition is not implemented yet.
+`src/workflow/graph.ts` calls ParancU's `retrieveCandidatesFromPrepared(question, corpus, 5)` directly in process. No HTTP server is required for this path. The normal workflow remains Retrieve → Generate → Verify, evaluating candidates in rank order, one at a time.
+
+The diagnostic recovery prototype adds at most one extra attempt per workflow. A rejection may include `missingConcepts: ["closed-book question answering"]`. The first concept becomes a new ParancU query such as `What is closed-book question answering?`. Recovery ranks the original corpus with `k = corpus.chunks.length`, preserving positional chunk indices, then checks valid, untried candidates in rank order with a focused LLM support check. The first candidate that adds sufficient evidence for the missing concepts to the original evidence is selected; mere mentions, duplication and nearby concepts are insufficient. The structured verdict is `addsMissingSupport` (boolean) plus `reason`. This can make one extra model call per eligible candidate until acceptance or exhaustion; it does not change ParancU scores or order. It does not scan text for matching words. Generation and verification receive the original question and two labeled chunks. The second verifier must also confirm that **all** previously missing concepts are covered. Missing complementary evidence or a rejected recovery resumes ordinary candidate fallback; operational failures propagate. There is no general planner or composition beyond two chunks.
 
 The verifier requires both checks to pass:
 
-1. **Evidence support:** the answer must be supported by the retrieved evidence in the current candidate's chunk.
+1. **Evidence support:** the answer must be supported by the supplied evidence (one candidate chunk, or the two-chunk recovery set).
 2. **Question alignment:** the answer must actually answer the original user question without substituting concepts, answering a nearby question, or treating distinct terms as equivalent.
 
 An answer that accurately summarizes a retrieved chunk but changes the meaning of the question is rejected.
 
-State contains `question`, `corpus`, `candidates`, `candidateIndex`, `answer`, `supported`, and `reason`. `src/workflow/runWorkflow.ts` returns either an accepted answer with structured `evidence` (`chunkIndex`, `text`, `candidateRank`, and `score`) and verification reason, or `no_evidence` without evidence when retrieval is empty or all candidates are rejected. Explicit retrieval, generation and verification errors propagate as errors. Empty model-output handling is outside this hardening step and remains unchanged. LLM verification is a safeguard, not a proof of grounding.
+State contains `question`, `corpus`, `candidates`, `candidateIndex`, `answer`, `supported`, `reason`, `missingConcepts`, `recoveryAttempted`, and `evidenceSet`. `src/workflow/runWorkflow.ts` returns either an accepted answer with structured `evidence` (`chunkIndex`, `text`, `candidateRank`, and `score`) and verification reason, or `no_evidence` without evidence when retrieval is empty or all attempts are rejected. Recovered answers additionally include `evidenceSet`, preserving both items and their `retrievalQuery`; ranks and scores belong to their respective queries. The existing single `evidence` field identifies the original candidate for compatibility, not the complete support for a recovered answer. Explicit retrieval, generation and verification errors propagate as errors. Empty recovery output is an operational error; normal-path empty-output handling is unchanged. LLM verification is a safeguard, not a proof of grounding.
 
 ## Run the synthetic workflow
 
@@ -45,7 +51,7 @@ The entry point prepares a synthetic Atlas/Nova document, enriches it, asks a qu
 
 ## Tracing
 
-`src/observability/langfuse.ts` configures OpenTelemetry with a Langfuse span processor. The workflow records a parent `parancu-workflow` observation and `retrieve`, `generate`, `verify`, and `advance` observations. Full evidence and answers are recorded, as approved for synthetic laboratory data. Explicit model/token/cost generation metadata is not currently recorded. Corpus preparation is outside the workflow observation.
+`src/observability/langfuse.ts` configures OpenTelemetry with a Langfuse span processor. The workflow records a parent `parancu-workflow` observation and `retrieve`, `generate`, `verify`, and `advance` observations. An optional `diagnostic-recovery` observation records the missing concepts, recovery query, evidence set, regenerated answer and verdict. Each eligible candidate check creates a nested `complement-selection` observation containing current evidence, candidate provenance, accepted/rejected status and reason. Full evidence and answers are recorded, as approved for synthetic laboratory data. Explicit model/token/cost generation metadata is not currently recorded. Corpus preparation is outside the workflow observation.
 
 ## Deterministic tests
 
@@ -57,7 +63,7 @@ npm test
 
 `src/workflow/runWorkflow.test.ts` exercises the public wrapper and actual graph using injected async retrieval, generation and verification fakes. `src/web/web.test.ts` adds store, adapter and loopback HTTP integration tests. Neither suite requires API credentials, embedding inference or a Langfuse exporter. Tests cover empty retrieval, acceptance at ranks 1–5, exact evidence/provenance and call order, exhaustion, operational errors, preparation states and persistence, concurrent requests and HTTP input handling. They verify orchestration behavior, not LLM semantic accuracy.
 
-The optional third `runWorkflow` argument accepts the existing `WorkflowDependencies`; normal callers continue using the default graph. No graph nodes or edges change.
+The optional third `runWorkflow` argument accepts `WorkflowDependencies`; normal callers use the default graph, including the bounded `recover` node. Recovery tests mock retrieval and OpenAI responses and exercise the real graph and verifier; they do not establish live retrieval or model accuracy.
 
 ## Other existing paths
 
@@ -102,7 +108,7 @@ Both live modes initialize the existing Langfuse SDK before loading preparation/
 
 ## Local web application
 
-The web application uses one Node/TypeScript process, the existing ParancU preparation functions and the unchanged LangGraph workflow. It serves static HTML/CSS/JavaScript and a JSON API on loopback. No React, Python backend, database or additional npm dependency is required.
+The web application uses one Node/TypeScript process, the existing ParancU preparation functions and the canonical LangGraph workflow. It serves static HTML/CSS/JavaScript and a JSON API on loopback. No React, Python backend, database or additional npm dependency is required.
 
 Install dependencies from the repository root (use a current supported Node version compatible with the installed packages, Node 22+):
 
@@ -132,8 +138,8 @@ npm run web:local
 
 1. Open **Settings** and enter an OpenAI key. The web app uses only the key entered here. Choose **Create from TXT**, select one nonempty UTF-8 `.txt` file up to 1 MiB, select English (default) or Italian, and click **Prepare document**. The browser reads the file and sends its unchanged text, name and language as JSON.
 2. The application returns a corpus ID immediately and polls `preparing`, `ready` or `failed`. Preparation does not automatically ask any question. There is no per-chunk progress percentage because the existing enrichment function does not expose one.
-3. When ready, enter a question and submit it. The server invokes `runWorkflow()` with a request-local adapter that delegates to the original retrieval, generation and verification functions. Retrieval executes once; the adapter preserves all returned candidates for inspection.
-4. An accepted answer links to its supporting chunk. The candidate list distinguishes the accepted citation, rejected candidates and candidates not evaluated by the verifier. Scores are retrieval scores, not probabilities. `no_evidence` is shown as a completed search with insufficient support; operational failures are shown separately as errors.
+3. When ready, enter a question and submit it. The server invokes `runWorkflow()` with a request-local adapter. The adapter preserves the initial retrieval candidates and any complementary chunk evaluated during diagnostic recovery.
+4. An accepted answer cites its supporting chunk, or both chunks after successful recovery. Recovery evidence includes the new retrieval query. The candidate list distinguishes accepted citations, rejected attempts and candidates not evaluated by the verifier. Scores are retrieval scores for their respective queries, not probabilities. `no_evidence` is shown as a completed search with insufficient support; operational failures are shown separately as errors.
 
 `src/web/corpusStore.ts` persists each completed corpus as `{ info, corpus }` in `data/web/corpora/<server-generated-uuid>.json`, including source filename, language and SHA-256 of the uploaded text. Uploaded filenames never become filesystem paths. The browser remembers only the last corpus ID and can reload that saved corpus after refresh or server restart without enrichment. Choosing and explicitly preparing a new file creates a new corpus; old corpora are not overwritten. The web store is separate from the real-corpus CLI's fixed JSON file.
 

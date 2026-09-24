@@ -289,19 +289,23 @@ function showAnswer(data) {
   byId("answer-badge").className = result.action === "answer" ? "badge ready" : "badge";
   byId("answer-text").textContent = result.action === "answer" ? result.answer : "No answer was supported by the passages checked. Try rephrasing your question or using another document.";
   if (result.action === "answer") {
-    const evidence = result.evidence;
-    byId("citation").textContent = `${data.corpus.name} · chunk ${evidence.chunkIndex} · candidate #${evidence.candidateRank} ↗`;
-    byId("citation").href = `#evidence-${evidence.candidateRank}`;
+    const evidenceSet = result.evidenceSet || [result.evidence];
+    const evidence = evidenceSet[0];
+    byId("citation").textContent = `${data.corpus.name} · ${evidenceSet.map(item => `chunk ${item.chunkIndex} · candidate #${item.candidateRank}`).join(" + ")} ↗`;
+    const firstAcceptedIndex = retrievedEvidence.findIndex(item => item.status === "accepted" && item.chunkIndex === evidence.chunkIndex);
+    byId("citation").href = `#evidence-${firstAcceptedIndex}`;
     byId("citation").hidden = false;
-    byId("citation").onclick = () => { byId(`evidence-${evidence.candidateRank}`).open = true; };
+    byId("citation").onclick = () => {
+      retrievedEvidence.forEach((item, index) => { if (item.status === "accepted") byId(`evidence-${index}`).open = true; });
+    };
     byId("verification").textContent = `Verification: ${result.reason}`;
     byId("verification").hidden = false;
   }
   byId("evidence-panel").hidden = false;
   byId("evidence-count").textContent = String(retrievedEvidence.length);
-  for (const evidence of retrievedEvidence) {
+  for (const [index, evidence] of retrievedEvidence.entries()) {
     const card = element("details", `evidence-card ${evidence.status === "accepted" ? "accepted" : ""}`);
-    card.id = `evidence-${evidence.candidateRank}`;
+    card.id = `evidence-${index}`;
     card.open = evidence.status === "accepted";
     const summary = element("summary");
     summary.append(element("span", "evidence-rank", `#${evidence.candidateRank}`),
@@ -311,6 +315,7 @@ function showAnswer(data) {
       }[evidence.status]), element("span", "evidence-score", `Retrieval score ${evidence.score.toFixed(3)}`));
     const body = element("div", "evidence-body");
     body.append(element("blockquote", "", evidence.text));
+    if (evidence.retrievalQuery) body.append(element("p", "", `Recovery query: ${evidence.retrievalQuery}`));
     if (evidence.reason) body.append(element("p", "", `Verification: ${evidence.reason}`));
     else body.append(element("p", "", "This passage was retrieved but has not been evaluated by the verifier."));
     card.append(summary, body);

@@ -446,7 +446,7 @@ test("real generation and verification use the memory key; upstream failures can
     assert.ok(!String(options.body).includes(sessionKey));
     calls++;
     if (calls === 1) return new Response(JSON.stringify({ output_text: "Atlas is blue." }));
-    if (calls === 2) return new Response(JSON.stringify({ output_text: '{"evidenceSupported":true,"questionAligned":true,"reason":"Direct support."}' }));
+    if (calls === 2) return new Response(JSON.stringify({ output_text: '{"claims":[{"claim":"Atlas is blue.","supported":true,"evidenceQuote":"Atlas is blue."}],"questionCovered":true,"conceptConflation":false,"missingConcepts":[],"reason":"Direct support."}' }));
     return new Response(JSON.stringify({ error: { message: sessionKey } }), { status: 401 });
   });
   const ask = createWorkflowService({ retrieveCandidates: async () => [candidate(0, "Atlas is blue.")],
@@ -478,7 +478,7 @@ test("JSON-escaped credentials in verifier output never become a returned reason
   // The credential is encoded inside output_text, so it emerges only after verifier JSON parsing.
   const encoded = sessionKey.split("").map(c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")).join("");
   t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
-    output_text: '{"evidenceSupported":true,"questionAligned":true,"reason":"' + encoded + '"}'
+    output_text: '{"claims":[{"claim":"Atlas is blue.","supported":true,"evidenceQuote":"Atlas is blue."}],"questionCovered":true,"conceptConflation":false,"missingConcepts":[],"reason":"' + encoded + '"}'
   })));
   await assert.rejects(keys.run(() => verifyEvidence("question", "answer", "evidence")), error => {
     assert.ok(error instanceof Error && !String(error).includes(sessionKey) && !error.cause);

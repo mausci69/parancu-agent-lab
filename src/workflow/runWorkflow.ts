@@ -2,6 +2,7 @@ import type { PrepareResult } from "../../services/parancu-api/src/local/prepare
 import { startActiveObservation } from "@langfuse/tracing";
 
 import { createWorkflowGraph, workflowGraph, type WorkflowDependencies } from "./graph";
+import type { WorkflowEvidence } from "./state";
 
 export type WorkflowResult =
   | {
@@ -14,6 +15,7 @@ export type WorkflowResult =
       candidateRank: number;
       score: number;
       reason: string;
+      evidenceSet?: WorkflowEvidence[];
       evidence: {
         chunkIndex: number;
         text: string;
@@ -52,7 +54,10 @@ export async function runWorkflow(
         candidateIndex: 0,
         answer: null,
         supported: null,
-        reason: null
+        reason: null,
+        missingConcepts: [],
+        recoveryAttempted: false,
+        evidenceSet: []
       });
 
       const candidate =
@@ -73,6 +78,7 @@ export async function runWorkflow(
           candidateRank: state.candidateIndex + 1,
           score: candidate.score,
           reason: state.reason ?? "",
+          ...(state.evidenceSet.length ? { evidenceSet: state.evidenceSet } : {}),
           evidence: {
             chunkIndex: candidate.chunk_index,
             text: candidate.chunk,
