@@ -11,7 +11,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { createWebServer } from "../web/server";
 import { CorpusStore } from "../web/corpusStore";
-import { KeyManager } from "../web/keyManager";
+import { SessionManager } from "../web/sessionManager";
 import { createWorkflowService } from "../web/workflowService";
 import { generateResponse } from "../responder/responseAgent";
 import { prepareCorpusLocal } from "../../services/parancu-api/src/local/prepareCorpus";
@@ -534,16 +534,18 @@ test("production Markdown regression through HTTP, web adapter, real generation 
   });
   const directory = await mkdtemp(path.join(tmpdir(), "parancu-verifier-http-"));
   const store = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c });
-  const keys = new KeyManager();
-  keys.set("sk-test-verifier-http-12345678901234567890");
+  const sessions = new SessionManager();
+  const session = sessions.resolve(undefined);
+  session.keys.set("sk-test-verifier-http-12345678901234567890");
   const server = createWebServer({
-    store, keys, webDirectory: path.resolve(__dirname, "../../apps/web"),
+    store, sessions, webDirectory: path.resolve(__dirname, "../../apps/web"),
     ask: createWorkflowService({
       retrieveCandidates: async () => [candidate(evidence)],
       generateAnswer: generateResponse, verifyAnswer: verifyEvidence
     })
   });
   t.after(async () => {
+    sessions.close();
     if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await store.drain();
     await rm(directory, { recursive: true, force: true });
@@ -552,7 +554,7 @@ test("production Markdown regression through HTTP, web adapter, real generation 
   await store.drain();
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/questions`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json", Cookie: session.setCookie!.split(";")[0] },
     body: JSON.stringify({ corpusId: info.id, question })
   });
   assert.equal(response.status, 200);

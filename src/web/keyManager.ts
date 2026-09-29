@@ -1,7 +1,7 @@
 import { assertNoCredentials, withOpenAIKey } from "../../services/parancu-api/src/local/openaiKeyStore";
 import { WebError } from "./corpusStore";
 
-/** One local workspace, one user-provided key held only in memory. */
+/** One browser session, one user-provided key held only in memory. */
 export class KeyManager {
   #key: string | null = null;
   #closed = false;
@@ -25,6 +25,13 @@ export class KeyManager {
     if (!this.current()) throw new WebError(409, "Add an OpenAI API key in Settings before preparing a document or asking a question.");
   }
   run<T>(work: () => T): T { this.require(); return withOpenAIKey(this.current, work); }
+  // Install a provider even without a key, preventing environment fallback.
+  context<T>(work: () => T): T { return withOpenAIKey(this.current, work); }
+  static checkContent(value: unknown) {
+    // Every accepted web key matches this guard, regardless of its session or lifetime.
+    try { assertNoCredentials(JSON.stringify(value), [process.env.OPENAI_API_KEY?.trim()]); }
+    catch { throw new WebError(400, "Remove credentials from the document, corpus, or question before continuing."); }
+  }
   checkContent(value: unknown) {
     // Environment secrets are still excluded from content, but never used for authentication.
     try { assertNoCredentials(JSON.stringify(value), [this.#key, process.env.OPENAI_API_KEY?.trim()]); }

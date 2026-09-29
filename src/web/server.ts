@@ -5,6 +5,7 @@ import { CorpusStore, WebError } from "./corpusStore";
 import type { WebWorkflowResult } from "./workflowService";
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
 import { KeyManager } from "./keyManager";
+import { SessionManager } from "./sessionManager";
 import { exportFilename, MAX_IMPORT_BYTES } from "./corpusFormat";
 
 type ServerOptions = {
@@ -12,7 +13,7 @@ type ServerOptions = {
   ask: (question: string, corpus: PrepareResult, retrievalOnly?: boolean) => Promise<WebWorkflowResult>;
   webDirectory: string;
   reportError?: (error: unknown) => void;
-  keys?: KeyManager;
+  sessions?: SessionManager;
 };
 const staticFiles: Record<string, [string, string]> = {
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -43,7 +44,7 @@ async function readJson(request: http.IncomingMessage, limit = 8 * 1024 * 1024):
 export function createWebServer(options: ServerOptions): http.Server {
   const reportError = options.reportError ?? console.error;
   const busyCorpora = new Set<string>();
-  const keys = options.keys ?? new KeyManager();
+  const sessions = options.sessions ?? new SessionManager();
   const server = http.createServer((request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Cache-Control", "no-store");
@@ -56,81 +57,87 @@ export function createWebServer(options: ServerOptions): http.Server {
     void (async () => {
       const port = request.socket.localPort;
       const host = request.headers.host;
+      const secure = "encrypted" in request.socket && request.socket.encrypted === true;
+      const protocol = secure ? "https" : "http";
       if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) throw new WebError(403, "Host not allowed.");
-      if ((request.headers.origin && request.headers.origin !== `http://${host}`) ||
+      if ((request.headers.origin && request.headers.origin !== `${protocol}://${host}`) ||
           request.headers["sec-fetch-site"] === "cross-site") throw new WebError(403, "Origin not allowed.");
-      const url = new URL(request.url ?? "/", `http://${host}`);
-      if (url.pathname === "/api/settings/openai") {
-        if (request.method === "GET") { send(200, keys.status()); return; }
-        if (request.method === "PUT") {
-          const body = await readJson(request, 2048);
-          try { keys.set(body.key); }
-          finally { delete body.key; }
-          send(200, keys.status()); return;
+      const { keys, setCookie } = sessions.resolve(request.headers.cookie, secure);
+      if (setCookie) response.setHeader("Set-Cookie", setCookie);
+      await keys.context(async () => {
+        const url = new URL(request.url ?? "/", `${protocol}://${host}`);
+        if (url.pathname === "/api/settings/openai") {
+          if (request.method === "GET") { send(200, keys.status()); return; }
+          if (request.method === "PUT") {
+            const body = await readJson(request, 2048);
+            try { keys.set(body.key); }
+            finally { delete body.key; }
+            send(200, keys.status()); return;
+          }
+          if (request.method === "DELETE") { keys.remove(); send(200, keys.status()); return; }
         }
-        if (request.method === "DELETE") { keys.remove(); send(200, keys.status()); return; }
-      }
-      if (request.method === "GET" && Object.hasOwn(staticFiles, url.pathname)) {
-        const [file, type] = staticFiles[url.pathname];
-        const content = await readFile(path.isAbsolute(file) ? file : path.join(options.webDirectory, file));
-        response.writeHead(200, { "Content-Type": type });
-        response.end(content);
-        return;
-      }
-      if (request.method === "POST" && url.pathname === "/api/corpora") {
-        const body = await readJson(request);
-        keys.require();
-        keys.checkContent(body);
-        // CorpusStore owns runtime validation; browser input is never trusted.
-        const info = keys.run(() => options.store.create(body as unknown as Parameters<CorpusStore["create"]>[0]));
-        send(202, info);
-        return;
-      }
-      if (request.method === "POST" && url.pathname === "/api/corpora/import") {
-        const body = await readJson(request, MAX_IMPORT_BYTES);
-        keys.checkContent(body);
-        const info = await options.store.import(body.corpus, body.name, body.language);
-        send(201, info);
-        return;
-      }
-      const exportMatch = /^\/api\/corpora\/([^/]+)\/export$/.exec(url.pathname);
-      if (request.method === "GET" && exportMatch) {
-        const payload = await options.store.export(exportMatch[1]);
-        keys.checkContent(payload);
-        response.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
-          "Content-Disposition": `attachment; filename="${exportFilename(payload.sourceFilename)}"` });
-        response.end(JSON.stringify(payload, null, 2));
-        return;
-      }
-      const corpusMatch = /^\/api\/corpora\/([^/]+)$/.exec(url.pathname);
-      if (request.method === "GET" && corpusMatch) {
-        const info = await options.store.getInfo(corpusMatch[1]);
-        keys.checkContent(info);
-        send(200, info);
-        return;
-      }
-      if (request.method === "POST" && url.pathname === "/api/questions") {
-        const body = await readJson(request);
-        keys.checkContent(body);
-        if (typeof body.corpusId !== "string" || typeof body.question !== "string" ||
-            !body.question.trim() || body.question.length > 4000) {
-          throw new WebError(400, "Provide a corpus and a question between 1 and 4,000 characters.");
+        if (request.method === "GET" && Object.hasOwn(staticFiles, url.pathname)) {
+          const [file, type] = staticFiles[url.pathname];
+          const content = await readFile(path.isAbsolute(file) ? file : path.join(options.webDirectory, file));
+          response.writeHead(200, { "Content-Type": type });
+          response.end(content);
+          return;
         }
-        const { info, corpus } = await options.store.getReady(body.corpusId);
-        keys.checkContent({ info, corpus });
-        if (busyCorpora.has(info.id)) throw new WebError(409, "A question is already being processed for this document.");
-        busyCorpora.add(info.id);
-        try {
-          const question = body.question.trim();
-          const result = keys.status().ready
-            ? await keys.run(() => options.ask(question, corpus))
-            : await options.ask(question, corpus, true);
-          keys.checkContent(result);
-          send(200, { corpus: info, ...result });
-        } finally { busyCorpora.delete(info.id); }
-        return;
-      }
-      throw new WebError(404, "Resource not found.");
+        if (request.method === "POST" && url.pathname === "/api/corpora") {
+          const body = await readJson(request);
+          keys.require();
+          keys.checkContent(body);
+          // CorpusStore owns runtime validation; browser input is never trusted.
+          const info = keys.run(() => options.store.create(body as unknown as Parameters<CorpusStore["create"]>[0]));
+          send(202, info);
+          return;
+        }
+        if (request.method === "POST" && url.pathname === "/api/corpora/import") {
+          const body = await readJson(request, MAX_IMPORT_BYTES);
+          keys.checkContent(body);
+          const info = await options.store.import(body.corpus, body.name, body.language);
+          send(201, info);
+          return;
+        }
+        const exportMatch = /^\/api\/corpora\/([^/]+)\/export$/.exec(url.pathname);
+        if (request.method === "GET" && exportMatch) {
+          const payload = await options.store.export(exportMatch[1]);
+          keys.checkContent(payload);
+          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
+            "Content-Disposition": `attachment; filename="${exportFilename(payload.sourceFilename)}"` });
+          response.end(JSON.stringify(payload, null, 2));
+          return;
+        }
+        const corpusMatch = /^\/api\/corpora\/([^/]+)$/.exec(url.pathname);
+        if (request.method === "GET" && corpusMatch) {
+          const info = await options.store.getInfo(corpusMatch[1]);
+          keys.checkContent(info);
+          send(200, info);
+          return;
+        }
+        if (request.method === "POST" && url.pathname === "/api/questions") {
+          const body = await readJson(request);
+          keys.checkContent(body);
+          if (typeof body.corpusId !== "string" || typeof body.question !== "string" ||
+              !body.question.trim() || body.question.length > 4000) {
+            throw new WebError(400, "Provide a corpus and a question between 1 and 4,000 characters.");
+          }
+          const { info, corpus } = await options.store.getReady(body.corpusId);
+          keys.checkContent({ info, corpus });
+          if (busyCorpora.has(info.id)) throw new WebError(409, "A question is already being processed for this document.");
+          busyCorpora.add(info.id);
+          try {
+            const question = body.question.trim();
+            const result = keys.status().ready
+              ? await keys.run(() => options.ask(question, corpus))
+              : await options.ask(question, corpus, true);
+            keys.checkContent(result);
+            send(200, { corpus: info, ...result });
+          } finally { busyCorpora.delete(info.id); }
+          return;
+        }
+        throw new WebError(404, "Resource not found.");
+      });
     })().catch(error => {
       if (!(error instanceof WebError)) reportError(new Error("Web operation failed."));
       if (!response.headersSent && !response.destroyed) {
@@ -140,7 +147,7 @@ export function createWebServer(options: ServerOptions): http.Server {
       }
     });
   });
-  server.once("close", () => keys.close());
+  server.once("close", () => sessions.close());
   return server;
 }
 
@@ -152,7 +159,7 @@ async function main(): Promise<void> {
   let primaryFailure = false;
   let store: CorpusStore | undefined;
   let server: http.Server | undefined;
-  const keys = new KeyManager();
+  const sessions = new SessionManager();
   try {
     const { prepareCorpusLocal } = await import("../../services/parancu-api/src/local/prepareCorpus.js");
     const { enrichPreparedCorpusWithOpenAI } = await import("../../services/parancu-api/src/lib/gen/openaiPrepare.js");
@@ -160,8 +167,8 @@ async function main(): Promise<void> {
     const root = path.resolve(__dirname, "../..");
     store = new CorpusStore(path.join(root, "data/web/corpora"), {
       prepare: prepareCorpusLocal, enrich: enrichPreparedCorpusWithOpenAI
-    }, console.error, value => keys.checkContent(value));
-    server = createWebServer({ store, keys, ask: createWorkflowService(), webDirectory: path.join(root, "apps/web") });
+    }, console.error, KeyManager.checkContent);
+    server = createWebServer({ store, sessions, ask: createWorkflowService(), webDirectory: path.join(root, "apps/web") });
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(port, "127.0.0.1", () => {
@@ -172,7 +179,7 @@ async function main(): Promise<void> {
     console.log(`ParancU Agent Lab: http://127.0.0.1:${port}`);
     console.log("Document preparation and questions use OpenAI. Press Ctrl+C to shut down after current operations finish.");
     await new Promise<void>((resolve, reject) => {
-      const stop = () => { keys.close(); cleanup(); resolve(); };
+      const stop = () => { sessions.close(); cleanup(); resolve(); };
       const fail = (error: Error) => { cleanup(); reject(error); };
       const cleanup = () => {
         process.removeListener("SIGINT", stop);
@@ -187,7 +194,7 @@ async function main(): Promise<void> {
     primaryFailure = true;
     throw error;
   } finally {
-    keys.close();
+    sessions.close();
     try {
       if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
       await store?.drain();

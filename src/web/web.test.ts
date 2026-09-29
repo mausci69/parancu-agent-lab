@@ -12,6 +12,7 @@ import { CorpusStore, MAX_TEXT_BYTES, WebError } from "./corpusStore";
 import { createWebServer } from "./server";
 import { createWorkflowService } from "./workflowService";
 import { KeyManager } from "./keyManager";
+import { SessionManager, SESSION_COOKIE } from "./sessionManager";
 import { importCorpus, validatePreparedCorpus, exportFilename } from "./corpusFormat";
 import { loadOpenAIKey } from "../../services/parancu-api/src/local/openaiKeyStore";
 import { requestOpenAI } from "../../services/parancu-api/src/local/openaiRequest";
@@ -22,6 +23,19 @@ const source = "Atlas is blue. Nova is red. Atlas weighs one kilogram. Nova is l
 const input = { name: "example.txt", text: source, language: "en" as const };
 const webDirectory = path.resolve(__dirname, "../../apps/web");
 const noLog = () => {};
+
+// Node fetch has no browser cookie jar; existing HTTP/UI fixtures use one per server.
+const browserCookies = new Map<string, string>();
+async function fetch(url: string, options: RequestInit = {}) {
+  const origin = new URL(url).origin;
+  const headers = new Headers(options.headers);
+  const cookie = browserCookies.get(origin);
+  if (cookie && !headers.has("Cookie")) headers.set("Cookie", cookie);
+  const response = await globalThis.fetch(url, { ...options, headers });
+  const updated = response.headers.get("set-cookie");
+  if (updated && browserCookies.has(origin)) browserCookies.set(origin, updated.split(";")[0]);
+  return response;
+}
 
 async function tempDirectory(t: TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "parancu-web-test-"));
@@ -51,14 +65,21 @@ function service(options: { fail?: boolean; reject?: boolean } = {}) {
 }
 
 async function startServer(t: TestContext, store: CorpusStore, ask = service(), keys = configuredKeys()) {
-  const server = createWebServer({ store, ask, keys, webDirectory, reportError: noLog });
+  const sessions = new SessionManager();
+  const browser = sessions.resolve(undefined);
+  if (keys.status().ready) browser.keys.set(sessionKey);
+  const server = createWebServer({ store, ask, sessions, webDirectory, reportError: noLog });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  browserCookies.set(base, browser.setCookie!.split(";")[0]);
   t.after(async () => {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    assert.equal(keys.status().ready, false, "server close clears credential access");
+    browserCookies.delete(base);
+    assert.equal(browser.keys.status().ready, false, "server close clears credential access");
+    keys.close();
     await store.drain();
   });
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return base;
 }
 
 async function post(base: string, endpoint: string, body: unknown, headers: Record<string, string> = {}) {
@@ -276,6 +297,117 @@ function environmentPresent(t: TestContext) {
     else process.env.OPENAI_API_KEY = previous;
   });
 }
+
+test("sessions validate cookies, bound capacity, expire credentials and close retained contexts", async t => {
+  environmentPresent(t);
+  let now = 0;
+  const sessions = new SessionManager(2, 100, () => now);
+  t.after(() => sessions.close());
+  const first = sessions.resolve(undefined);
+  const cookie = first.setCookie!.split(";")[0];
+  assert.match(cookie, /^parancu_session=[A-Za-z0-9_-]{43}$/);
+  assert.match(first.setCookie!, /; HttpOnly; SameSite=Strict; Path=\/$/);
+  assert.doesNotMatch(first.setCookie!, /Domain|Expires|Max-Age|Secure/);
+  first.keys.set(sessionKey);
+  assert.equal(sessions.resolve(cookie).keys, first.keys);
+  assert.equal(sessions.resolve(cookie).setCookie, undefined);
+  const second = sessions.resolve(undefined, true);
+  assert.match(second.setCookie!, /; Secure$/);
+  assert.notEqual(second.keys, first.keys);
+  assert.equal(await second.keys.context(loadOpenAIKey), null);
+  for (const invalid of [SESSION_COOKIE, `${SESSION_COOKIE}=`, `${SESSION_COOKIE}=bad`,
+    `${cookie}; ${cookie}`, `${SESSION_COOKIE} =${cookie.split("=")[1]}`, `${SESSION_COOKIE}="${cookie.split("=")[1]}"`]) {
+    assert.throws(() => sessions.resolve(invalid), (error: unknown) => error instanceof WebError && error.status === 400);
+  }
+  assert.throws(() => sessions.resolve(undefined), (error: unknown) => error instanceof WebError && error.status === 503);
+  assert.equal(first.keys.status().ready, true, "capacity must not evict an active key");
+  await first.keys.context(async () => {
+    now = 100;
+    const replacement = sessions.resolve(cookie);
+    assert.notEqual(replacement.setCookie!.split(";")[0], cookie);
+    assert.equal(replacement.keys.status().ready, false);
+    assert.equal(await loadOpenAIKey(), null, "expiry closes the provider retained by running work");
+  });
+  assert.throws(() => first.keys.set(sessionKey), WebError);
+  const unknown = sessions.resolve(`${SESSION_COOKIE}=${"A".repeat(43)}`);
+  assert.notEqual(unknown.setCookie!.split(";")[0], `${SESSION_COOKIE}=${"A".repeat(43)}`);
+  unknown.keys.set(sessionKey);
+  await unknown.keys.context(async () => {
+    sessions.close();
+    assert.equal(await loadOpenAIKey(), null);
+  });
+  assert.throws(() => sessions.resolve(undefined), WebError);
+  assert.throws(() => unknown.keys.set(sessionKey), WebError);
+});
+
+test("browser sessions isolate settings, question credentials and background TXT preparation", async t => {
+  environmentPresent(t);
+  const preparationStarted = deferred();
+  const finishPreparation = deferred();
+  const preparationKeys: Array<string | null> = [];
+  const store = new CorpusStore(await tempDirectory(t), {
+    prepare: prepareCorpusLocal,
+    enrich: async corpus => {
+      preparationKeys.push(await loadOpenAIKey());
+      preparationStarted.resolve();
+      await finishPreparation.promise;
+      preparationKeys.push(await loadOpenAIKey());
+      return corpus;
+    }
+  }, noLog, KeyManager.checkContent);
+  const observed: Array<{ key: string | null; retrievalOnly: boolean }> = [];
+  const base = await startServer(t, store, async (question, corpus, retrievalOnly = false) => {
+    observed.push({ key: await loadOpenAIKey(), retrievalOnly });
+    return service()(question, corpus, retrievalOnly);
+  }, new KeyManager());
+  // Raw fetch deliberately bypasses the fixture cookie jar to model separate browsers.
+  const browser = async () => {
+    const page = await globalThis.fetch(base);
+    await page.text();
+    assert.equal(page.headers.get("cache-control"), "no-store");
+    const cookie = page.headers.get("set-cookie")!.split(";")[0];
+    return (route: string, method = "GET", body?: unknown) => globalThis.fetch(base + route, {
+      method, headers: { Cookie: cookie, "Content-Type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+    });
+  };
+  const a = await browser();
+  const b = await browser();
+  const otherKey = "sk-test-other-browser-12345678901234567890";
+  const settings = "/api/settings/openai";
+  assert.equal((await a(settings, "PUT", { key: sessionKey })).status, 200);
+  assert.deepEqual(await (await b(settings)).json(), { ready: false, source: "none" });
+  const imported = await b("/api/corpora/import", "POST", { corpus: enriched(), name: "shared.json", language: "en" });
+  assert.equal(imported.status, 201);
+  const info = await imported.json();
+  const question = { corpusId: info.id, question: "What color?" };
+  assert.equal((await (await a("/api/questions", "POST", question)).json()).result.action, "answer");
+  assert.equal((await (await b("/api/questions", "POST", question)).json()).result.action, "retrieval_only");
+  assert.equal((await b("/api/corpora", "POST", input)).status, 409);
+  const prepared = await a("/api/corpora", "POST", input);
+  assert.equal(prepared.status, 202);
+  await preparationStarted.promise;
+  try {
+    assert.equal((await b(settings, "PUT", { key: otherKey })).status, 200);
+    assert.equal((await (await b("/api/questions", "POST", question)).json()).result.action, "answer");
+  } finally { finishPreparation.resolve(); }
+  await store.drain();
+  assert.deepEqual(preparationKeys, [sessionKey, sessionKey]);
+  assert.equal((await a(settings, "DELETE")).status, 200);
+  assert.equal((await (await a("/api/questions", "POST", question)).json()).result.action, "retrieval_only");
+  assert.deepEqual(await (await b(settings)).json(), { ready: true, source: "session" });
+  assert.equal((await (await b("/api/questions", "POST", question)).json()).result.action, "answer");
+  assert.deepEqual(observed, [
+    { key: sessionKey, retrievalOnly: false }, { key: null, retrievalOnly: true },
+    { key: otherKey, retrievalOnly: false }, { key: null, retrievalOnly: true },
+    { key: otherKey, retrievalOnly: false }
+  ]);
+  assert.equal((await a(`/api/corpora/${info.id}/export`)).status, 200);
+  assert.equal((await b(`/api/corpora/${info.id}/export`)).status, 200);
+  const malformed = await globalThis.fetch(base + settings, { headers: { Cookie: `${SESSION_COOKIE}=bad` } });
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.headers.get("set-cookie"), null);
+});
 
 test("web memory keys ignore the environment before use, after removal, and after shutdown", async t => {
   environmentPresent(t);
