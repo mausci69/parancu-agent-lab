@@ -9,7 +9,7 @@ import { exportFilename, MAX_IMPORT_BYTES } from "./corpusFormat";
 
 type ServerOptions = {
   store: CorpusStore;
-  ask: (question: string, corpus: PrepareResult) => Promise<WebWorkflowResult>;
+  ask: (question: string, corpus: PrepareResult, retrievalOnly?: boolean) => Promise<WebWorkflowResult>;
   webDirectory: string;
   reportError?: (error: unknown) => void;
   keys?: KeyManager;
@@ -111,7 +111,6 @@ export function createWebServer(options: ServerOptions): http.Server {
       }
       if (request.method === "POST" && url.pathname === "/api/questions") {
         const body = await readJson(request);
-        keys.require();
         keys.checkContent(body);
         if (typeof body.corpusId !== "string" || typeof body.question !== "string" ||
             !body.question.trim() || body.question.length > 4000) {
@@ -122,7 +121,10 @@ export function createWebServer(options: ServerOptions): http.Server {
         if (busyCorpora.has(info.id)) throw new WebError(409, "A question is already being processed for this document.");
         busyCorpora.add(info.id);
         try {
-          const result = await keys.run(() => options.ask((body.question as string).trim(), corpus));
+          const question = body.question.trim();
+          const result = keys.status().ready
+            ? await keys.run(() => options.ask(question, corpus))
+            : await options.ask(question, corpus, true);
           keys.checkContent(result);
           send(200, { corpus: info, ...result });
         } finally { busyCorpora.delete(info.id); }

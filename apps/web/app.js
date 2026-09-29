@@ -18,7 +18,7 @@ function showKeyStatus(status) {
   byId("key-status").className = status.ready ? "badge ready" : "badge";
   byId("settings-status").textContent = status.source === "session"
     ? "Ready · using a session key."
-    : "Add a key to prepare TXT documents or ask questions. Import and export work without a key.";
+    : "Add a key for TXT preparation and verified answers. Local retrieval, import and export work without a key.";
   byId("remove-key").disabled = settingsBusy || status.source !== "session";
   controls();
 }
@@ -134,25 +134,27 @@ function controls() {
   byId("language").disabled = locked || corpus?.status === "ready";
   byId("prepare").disabled = !file || locked || corpus?.status === "ready" || (mode === "txt" && !keyState.ready);
   byId("prepare").textContent = preparing ? (mode === "import" ? "Importing…" : "Preparing…") : mode === "import" ? "Import corpus ↗" : "Prepare document ↗";
-  const canAsk = corpus?.status === "ready" && keyState.ready && !asking;
+  const canAsk = corpus?.status === "ready" && !asking;
   byId("question").disabled = !canAsk;
   byId("ask").disabled = !canAsk;
-  byId("ask").textContent = asking ? "Finding an answer…" : "Find an answer →";
-  byId("question-hint").textContent = !keyState.ready ? "Add an OpenAI key in Settings to ask questions." : corpus?.status === "ready"
+  byId("ask").textContent = keyState.ready ? (asking ? "Finding an answer…" : "Find an answer →") : (asking ? "Retrieving evidence…" : "Find evidence →");
+  byId("question-hint").textContent = !keyState.ready ? "Retrieval-only mode: find local evidence without generating or verifying an answer." : corpus?.status === "ready"
     ? "A specific question helps find the right evidence."
     : "You can ask a question once preparation is complete.";
   if (corpus?.status === "ready") {
     byId("document-status").textContent = keyState.ready
       ? "Corpus loaded and ready. Ask questions without preparing it again."
-      : "Corpus loaded and ready. Export is available. Add an OpenAI key in Settings to ask questions.";
+      : "Corpus loaded and ready. Export is available. Retrieval-only mode: find local evidence without generating or verifying an answer.";
   }
 }
 
 function pipeline(mode) {
+  const retrievalOnly = mode === "retrieved" || (mode === "asking" && !keyState.ready);
   ["document", "retrieve", "generate", "verify"].forEach((name, index) => {
     const node = byId(`step-${name}`);
     node.className = "";
-    if (mode === "complete" || (index === 0 && (mode === "ready" || mode === "asking"))) node.classList.add("complete");
+    if (retrievalOnly && index > 1) return;
+    if (mode === "complete" || mode === "retrieved" || (index === 0 && (mode === "ready" || mode === "asking"))) node.classList.add("complete");
     else if (index === 0) node.classList.add("active");
     if (mode === "asking" && index > 0) node.classList.add("working");
   });
@@ -282,12 +284,13 @@ function element(tag, className, text) {
 
 function showAnswer(data) {
   const { result, retrievedEvidence } = data;
+  const retrievalOnly = result.action === "retrieval_only";
   byId("answer-placeholder").hidden = true;
   byId("answer-content").hidden = false;
   byId("asked-question").textContent = result.question;
-  byId("answer-badge").textContent = result.action === "answer" ? "SUPPORT VERIFIED" : "INSUFFICIENT EVIDENCE";
+  byId("answer-badge").textContent = retrievalOnly ? "RETRIEVAL ONLY" : result.action === "answer" ? "SUPPORT VERIFIED" : "INSUFFICIENT EVIDENCE";
   byId("answer-badge").className = result.action === "answer" ? "badge ready" : "badge";
-  byId("answer-text").textContent = result.action === "answer" ? result.answer : "No answer was supported by the passages checked. Try rephrasing your question or using another document.";
+  byId("answer-text").textContent = retrievalOnly ? "Local ParancU retrieval only. No answer was generated or verified. Review the retrieved passages below." : result.action === "answer" ? result.answer : "No answer was supported by the passages checked. Try rephrasing your question or using another document.";
   if (result.action === "answer") {
     const evidenceSet = result.evidenceSet || [result.evidence];
     const evidence = evidenceSet[0];
@@ -306,7 +309,7 @@ function showAnswer(data) {
   for (const [index, evidence] of retrievedEvidence.entries()) {
     const card = element("details", `evidence-card ${evidence.status === "accepted" ? "accepted" : ""}`);
     card.id = `evidence-${index}`;
-    card.open = evidence.status === "accepted";
+    card.open = retrievalOnly || evidence.status === "accepted";
     const summary = element("summary");
     summary.append(element("span", "evidence-rank", `#${evidence.candidateRank}`),
       element("span", "evidence-title", `Chunk ${evidence.chunkIndex}`),
@@ -328,7 +331,7 @@ byId("question").addEventListener("input", controls);
 byId("question-form").addEventListener("submit", async event => {
   event.preventDefault();
   const question = byId("question").value.trim();
-  if (corpus?.status !== "ready" || asking || !question || !keyState.ready) return;
+  if (corpus?.status !== "ready" || asking || !question) return;
   asking = true;
   controls();
   errorMessage("");
@@ -337,11 +340,11 @@ byId("question-form").addEventListener("submit", async event => {
   byId("answer-placeholder").hidden = true;
   byId("answer-panel").setAttribute("aria-busy", "true");
   byId("activity").hidden = false;
-  byId("activity").textContent = "Retrieving evidence, generating an answer, and verifying support…";
+  byId("activity").textContent = keyState.ready ? "Retrieving evidence, generating an answer, and verifying support…" : "Retrieving local evidence only…";
   try {
     const data = await api("/api/questions", { method: "POST", body: JSON.stringify({ corpusId: corpus.id, question }) });
     showAnswer(data);
-    pipeline("complete");
+    pipeline(data.result.action === "retrieval_only" ? "retrieved" : "complete");
   } catch (error) {
     errorMessage(error.message);
     byId("answer-badge").textContent = "OPERATIONAL ERROR";

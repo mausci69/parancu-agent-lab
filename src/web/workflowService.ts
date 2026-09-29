@@ -15,7 +15,7 @@ export type RetrievedEvidence = {
   reason?: string;
   retrievalQuery?: string;
 };
-export type WebWorkflowResult = { result: WorkflowResult; retrievedEvidence: RetrievedEvidence[] };
+export type WebWorkflowResult = { result: WorkflowResult | { action: "retrieval_only"; question: string }; retrievedEvidence: RetrievedEvidence[] };
 
 const defaults: WorkflowDependencies = {
   retrieveCandidates: retrieveCandidatesFromPrepared,
@@ -24,7 +24,17 @@ const defaults: WorkflowDependencies = {
 };
 
 export function createWorkflowService(dependencies: WorkflowDependencies = defaults) {
-  return async (question: string, corpus: PrepareResult): Promise<WebWorkflowResult> => {
+  return async (question: string, corpus: PrepareResult, retrievalOnly = false): Promise<WebWorkflowResult> => {
+    if (retrievalOnly) {
+      const candidates = await dependencies.retrieveCandidates(question, corpus, 5);
+      return {
+        result: { action: "retrieval_only", question },
+        retrievedEvidence: candidates.map((candidate, index) => ({
+          chunkIndex: candidate.chunk_index, text: candidate.chunk, summary: candidate.summary,
+          candidateRank: index + 1, score: candidate.score, status: "not_evaluated"
+        }))
+      };
+    }
     // Everything below is request-local, including attempt order for identical chunk texts.
     let candidates: RetrieveResult[] = [];
     let currentIndex = -1;

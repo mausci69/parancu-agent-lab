@@ -307,7 +307,7 @@ test("removal affects subsequent requests within an existing async context", asy
   });
 });
 
-test("HTTP Use key and Remove key gate preparation/questions despite environment credentials; import stays usable", async t => {
+test("HTTP Use key and Remove key switch retrieval-only questions despite environment credentials", async t => {
   environmentPresent(t);
   const directory = await tempDirectory(t);
   let enrichCalls = 0;
@@ -316,12 +316,15 @@ test("HTTP Use key and Remove key gate preparation/questions despite environment
   const base = await startServer(t, store, service(), keys);
   assert.deepEqual(await (await fetch(base + "/api/settings/openai")).json(), { ready: false, source: "none" });
   assert.equal((await post(base, "/api/corpora", input)).status, 409);
-  assert.equal((await post(base, "/api/questions", { corpusId: "x", question: "Question?" })).status, 409);
+  assert.equal((await post(base, "/api/questions", { corpusId: "x", question: "Question?" })).status, 404);
   const imported = await post(base, "/api/corpora/import", { corpus: enriched(), name: "Atlas.prepared.json", language: "en" });
   assert.equal(imported.status, 201);
   const info = await imported.json();
   assert.equal(info.origin, "imported");
   assert.equal(info.status, "ready");
+  const initialLocal = await post(base, "/api/questions", { corpusId: info.id, question: "What color?" });
+  assert.equal(initialLocal.status, 200);
+  assert.equal((await initialLocal.json()).result.action, "retrieval_only");
   const configured = await fetch(base + "/api/settings/openai", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: sessionKey }) });
   assert.equal(configured.status, 200);
   assert.deepEqual(await configured.json(), { ready: true, source: "session" });
@@ -336,7 +339,11 @@ test("HTTP Use key and Remove key gate preparation/questions despite environment
   assert.deepEqual(await (await fetch(base + "/api/settings/openai")).json(), { ready: false, source: "none" });
   assert.equal((await post(base, "/api/corpora", input)).status, 409);
   assert.equal((await post(base, "/api/corpora/import", { corpus: enriched(), name: "second.json", language: "en" })).status, 201);
-  assert.equal((await post(base, "/api/questions", { corpusId: info.id, question: "What color?" })).status, 409);
+  const local = await post(base, "/api/questions", { corpusId: info.id, question: "What color?" });
+  assert.equal(local.status, 200);
+  const localResult = await local.json();
+  assert.equal(localResult.result.action, "retrieval_only");
+  assert.deepEqual(localResult.retrievedEvidence.map((item: { status: string }) => item.status), ["not_evaluated", "not_evaluated", "not_evaluated"]);
   assert.equal((await fetch(base + "/api/corpora/" + info.id + "/export")).status, 200);
   const disk = await readFile(path.join(directory, info.id + ".json"), "utf8");
   assert.ok(!disk.includes(sessionKey));
@@ -561,9 +568,9 @@ test("UI imports without a key and preserves the visible corpus across active-ta
   assertLoaded();
   node("mode-import").fire("click");
   assertLoaded();
-  assert.match(node("document-status").textContent, /loaded.*Export.*OpenAI key/);
-  assert.equal(node("question").disabled, true);
-  assert.equal(node("ask").disabled, true);
+  assert.match(node("document-status").textContent, /loaded.*Retrieval-only/);
+  assert.equal(node("question").disabled, false);
+  assert.equal(node("ask").disabled, false);
   assert.equal((await fetch(base + node("export-corpus").href)).status, 200);
   const finishSettings = async () => {
     for (let attempt = 0; attempt < 200; attempt++) {
@@ -593,9 +600,9 @@ test("UI imports without a key and preserves the visible corpus across active-ta
   await finishSettings();
   assertLoaded();
   assert.equal(node("key-status").textContent, "OpenAI key missing");
-  assert.equal(node("question").disabled, true);
-  assert.equal(node("ask").disabled, true);
-  assert.match(node("document-status").textContent, /loaded.*Export.*OpenAI key/);
+  assert.equal(node("question").disabled, false);
+  assert.equal(node("ask").disabled, false);
+  assert.match(node("document-status").textContent, /loaded.*Retrieval-only/);
   node("openai-key").value = sessionKey;
   node("key-form").fire("submit");
   await finishSettings();
@@ -615,7 +622,7 @@ test("UI imports without a key and preserves the visible corpus across active-ta
   assert.equal(node("prepare").disabled, true);
 });
 
-test("Settings UI reflects server key state, clears input, closes on Use key, and disables work after removal", async t => {
+test("Settings UI reflects server key state, clears input, closes on Use key, and switches to local retrieval after removal", async t => {
   environmentPresent(t);
   const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
   const base = await startServer(t, store, service(), new KeyManager());
@@ -649,7 +656,7 @@ test("Settings UI reflects server key state, clears input, closes on Use key, an
   vm.runInContext("mode = 'import'; controls()", context);
   assert.equal(node("prepare").disabled, false, "import does not require a key");
   vm.runInContext("mode = 'txt'; corpus = {status:'ready'}; controls()", context);
-  assert.equal(node("question").disabled, true);
+  assert.equal(node("question").disabled, false);
 
   node("settings-dialog").showModal();
   node("openai-key").value = sessionKey;
@@ -669,8 +676,8 @@ test("Settings UI reflects server key state, clears input, closes on Use key, an
   assert.equal(node("key-status").textContent, "OpenAI key missing");
   assert.equal(node("prepare").disabled, true);
   vm.runInContext("corpus = {status:'ready'}; controls()", context);
-  assert.equal(node("question").disabled, true);
-  assert.equal(node("ask").disabled, true);
+  assert.equal(node("question").disabled, false);
+  assert.equal(node("ask").disabled, false);
   assert.deepEqual(writes, [], "key settings must not write browser storage");
 
   node("openai-key").value = "invalid";
@@ -689,4 +696,71 @@ test("Settings UI reflects server key state, clears input, closes on Use key, an
   assert.equal(node("settings-dialog").open, false);
   assert.equal(node("openai-key").value, "");
   assert.equal(node("key-status").textContent, "OpenAI ready");
+});
+
+
+test("retrieval-only service preserves rankings, handles empty results and never calls LLM steps", async () => {
+  const corpus = enriched();
+  for (const candidates of [[candidate(4, "Atlas is blue."), candidate(2, "Nova is red.")], []]) {
+    let retrievals = 0;
+    const forbidden = async (): Promise<never> => { assert.fail("LLM step called in retrieval-only mode"); };
+    const ask = createWorkflowService({
+      retrieveCandidates: async (question, active, k) => {
+        retrievals++; assert.equal(question, "What color?"); assert.equal(active, corpus); assert.equal(k, 5);
+        return candidates;
+      }, generateAnswer: forbidden, verifyAnswer: forbidden, checkComplement: forbidden
+    });
+    const response = await ask("What color?", corpus, true);
+    assert.equal(retrievals, 1);
+    assert.deepEqual(response.result, { action: "retrieval_only", question: "What color?" });
+    assert.deepEqual(response.retrievedEvidence, candidates.map((c, i) => ({
+      chunkIndex: c.chunk_index, text: c.chunk, summary: c.summary,
+      candidateRank: i + 1, score: c.score, status: "not_evaluated"
+    })));
+  }
+});
+
+test("retrieval-only UI submits questions, displays unverified evidence and skips Generate/Verify progress", async () => {
+  const nodes = new Map<string, any>();
+  const makeNode = () => ({
+    value: "", textContent: "", hidden: false, disabled: false, className: "", children: [] as any[],
+    listeners: new Map<string, any>(),
+    classList: { toggle() {}, add() {} }, setAttribute() {},
+    append(...items: any[]) { this.children.push(...items); },
+    replaceChildren() { this.children = []; },
+    addEventListener(name: string, listener: any) { this.listeners.set(name, listener); }
+  });
+  const node = (id: string) => { if (!nodes.has(id)) nodes.set(id, makeNode()); return nodes.get(id); };
+  let requests = 0;
+  const context = vm.createContext({
+    document: { getElementById: node, createElement: makeNode }, window: { addEventListener() {} },
+    localStorage: { getItem: () => null },
+    fetch: async (url: string, options: any) => {
+      if (url === "/api/settings/openai") return { ok: true, json: async () => ({ ready: false, source: "none" }) };
+      requests++;
+      assert.equal(url, "/api/questions");
+      assert.deepEqual(JSON.parse(options.body), { corpusId: "active", question: "What color?" });
+      assert.match(node("activity").textContent, /local evidence only/);
+      assert.equal(node("step-generate").className, "");
+      assert.equal(node("step-verify").className, "");
+      return { ok: true, json: async () => ({ result: { action: "retrieval_only", question: "What color?" },
+        retrievedEvidence: requests === 1 ? [{ chunkIndex: 0, candidateRank: 1, text: "Atlas is blue.", score: 0.9, status: "not_evaluated" }] : [] }) };
+    }
+  });
+  vm.runInContext(await readFile(path.join(webDirectory, "app.js"), "utf8"), context);
+  vm.runInContext('corpus = { id: "active", status: "ready" }; controls()', context);
+  assert.equal(node("ask").disabled, false);
+  assert.equal(node("ask").textContent, "Find evidence →");
+  node("question").value = "What color?";
+  await node("question-form").listeners.get("submit")({ preventDefault() {} });
+  assert.equal(requests, 1);
+  assert.equal(node("answer-badge").textContent, "RETRIEVAL ONLY");
+  assert.match(node("answer-text").textContent, /No answer was generated or verified/);
+  assert.equal(node("verification").hidden, true);
+  assert.equal(node("citation").hidden, true);
+  assert.equal(node("evidence-list").children[0].open, true);
+  assert.equal(node("step-generate").className, "");
+  await node("question-form").listeners.get("submit")({ preventDefault() {} });
+  assert.equal(node("evidence-count").textContent, "0");
+  assert.equal(node("evidence-list").children[0].textContent, "ParancU returned no candidates.");
 });
