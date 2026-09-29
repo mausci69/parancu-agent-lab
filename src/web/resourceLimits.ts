@@ -3,12 +3,14 @@ import { WebError } from "./webError";
 export type WebLimits = Readonly<{
   maxTextBytes: number; maxImportBytes: number; maxChunks: number; maxCorpora: number;
   maxPreparations: number; maxQuestions: number; maxRetrievals: number;
+  maxCorpusDiskBytes: number;
 }>;
 export const DEFAULT_WEB_LIMITS: WebLimits = Object.freeze({
   maxTextBytes: 1024 * 1024,
   maxImportBytes: 8 * 1024 * 1024,
   maxChunks: 256,
   maxCorpora: 32,
+  maxCorpusDiskBytes: 67_108_864,
   maxPreparations: 1,
   maxQuestions: 2,
   maxRetrievals: 2
@@ -18,6 +20,7 @@ export const TXT_ENVELOPE_BYTES = 4096;
 const variables: Record<keyof WebLimits, string> = {
   maxTextBytes: "WEB_MAX_TEXT_BYTES", maxImportBytes: "WEB_MAX_IMPORT_BYTES",
   maxChunks: "WEB_MAX_CHUNKS", maxCorpora: "WEB_MAX_CORPORA",
+  maxCorpusDiskBytes: "WEB_MAX_CORPUS_DISK_BYTES",
   maxPreparations: "WEB_MAX_PREPARATIONS", maxQuestions: "WEB_MAX_QUESTIONS",
   maxRetrievals: "WEB_MAX_RETRIEVALS"
 };

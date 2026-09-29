@@ -35,6 +35,9 @@ export class CorpusStore {
   private readonly pending = new Set<Promise<void>>();
   private readonly reservations = new Set<string>();
   private readonly loading = new Map<string, Promise<Entry>>();
+  private readonly persistedBytes = new Map<string, number>();
+  // Includes in-flight reservations; startup supplies an empty directory.
+  private diskBytes = 0;
 
   constructor(
     private readonly directory: string,
@@ -119,16 +122,31 @@ export class CorpusStore {
 
   private async persist(info: CorpusInfo, corpus: PrepareResult): Promise<void> {
     this.checkContent({ info, corpus });
-    await mkdir(this.directory, { recursive: true });
+    const payload = JSON.stringify({ info, corpus });
+    const bytes = Buffer.byteLength(payload, "utf8");
+    if (bytes > this.resources.limits.maxCorpusDiskBytes - this.diskBytes) {
+      throw new WebError(429, "Corpus storage capacity reached. Try again later.");
+    }
+    this.diskBytes += bytes;
     const destination = path.join(this.directory, `${info.id}.json`);
     const temporary = `${destination}.${randomUUID()}.tmp`;
+    let persisted = false;
     try {
-      await writeFile(temporary, JSON.stringify({ info, corpus }), { encoding: "utf8", flag: "wx", mode: 0o600 });
+      await mkdir(this.directory, { recursive: true });
+      await writeFile(temporary, payload, { encoding: "utf8", flag: "wx", mode: 0o600 });
       await rename(temporary, destination);
+      this.persistedBytes.set(info.id, bytes);
+      persisted = true;
+    } catch {
+      throw new WebError(500, "Could not save the corpus.");
     } finally {
+      if (!persisted) this.diskBytes -= bytes;
       try { await unlink(temporary); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") this.reportError(new Error("Temporary corpus cleanup failed."));
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          try { this.reportError(new Error("Temporary corpus cleanup failed.")); }
+          catch { /* Reporting cannot change persistence accounting. */ }
+        }
       }
     }
   }
@@ -218,12 +236,19 @@ export class CorpusStore {
   async remove(id: string): Promise<void> {
     if (!validId.test(id)) return;
     this.entries.delete(id);
+    const bytes = this.persistedBytes.get(id);
     try { await unlink(path.join(this.directory, `${id}.json`)); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         try { this.reportError(new Error("Corpus removal failed.")); }
         catch { /* Reporting must not expose filesystem errors or reject cleanup. */ }
+        return;
       }
+    }
+    // Do not release an in-flight write, or release twice for concurrent removals.
+    if (bytes !== undefined && this.persistedBytes.get(id) === bytes) {
+      this.persistedBytes.delete(id);
+      this.diskBytes -= bytes;
     }
   }
 

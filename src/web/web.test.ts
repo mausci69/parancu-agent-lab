@@ -1226,14 +1226,66 @@ test("retrieval-only UI submits questions, displays unverified evidence and skip
 
 test("resource configuration has conservative defaults and rejects invalid overrides", () => {
   assert.deepEqual(readWebLimits({}), { maxTextBytes: 1048576, maxImportBytes: 8388608,
-    maxChunks: 256, maxCorpora: 32, maxPreparations: 1, maxQuestions: 2, maxRetrievals: 2 });
+    maxChunks: 256, maxCorpora: 32, maxCorpusDiskBytes: 67108864, maxPreparations: 1, maxQuestions: 2, maxRetrievals: 2 });
   const env = { WEB_MAX_TEXT_BYTES: "12", WEB_MAX_IMPORT_BYTES: "13", WEB_MAX_CHUNKS: "14",
-    WEB_MAX_CORPORA: "15", WEB_MAX_PREPARATIONS: "2", WEB_MAX_QUESTIONS: "3", WEB_MAX_RETRIEVALS: "4" };
+    WEB_MAX_CORPORA: "15", WEB_MAX_CORPUS_DISK_BYTES: "16", WEB_MAX_PREPARATIONS: "2", WEB_MAX_QUESTIONS: "3", WEB_MAX_RETRIEVALS: "4" };
   assert.deepEqual(readWebLimits(env), { maxTextBytes: 12, maxImportBytes: 13, maxChunks: 14,
-    maxCorpora: 15, maxPreparations: 2, maxQuestions: 3, maxRetrievals: 4 });
+    maxCorpora: 15, maxCorpusDiskBytes: 16, maxPreparations: 2, maxQuestions: 3, maxRetrievals: 4 });
   for (const key of Object.keys(env)) for (const value of ["", "0", "-1", "1.5", " 2", "2e2", "Infinity", "9007199254740992"]) {
     assert.throws(() => readWebLimits({ [key]: value }), new RegExp(key));
   }
+});
+
+async function diskQuotaFixture(t: TestContext) {
+  const directory = await tempDirectory(t);
+  const dependencies = { prepare: prepareCorpusLocal, enrich: async (c: ReturnType<typeof enriched>) => c };
+  const baseline = new CorpusStore(directory, dependencies, noLog);
+  const info = await baseline.import(enriched(), "café.json", "en");
+  const payload = await baseline.export(info.id);
+  const bytes = (await readFile(path.join(directory, `${info.id}.json`))).byteLength;
+  await baseline.remove(info.id);
+  const store = new CorpusStore(directory, dependencies, noLog, undefined,
+    new WebResources({ ...DEFAULT_WEB_LIMITS, maxCorpusDiskBytes: bytes }));
+  return { directory, payload, bytes, store };
+}
+
+test("persisted corpus quota accepts the exact UTF-8 size, rejects excess, and is released by removal", async t => {
+  const { directory, payload, bytes, store } = await diskQuotaFixture(t);
+  const first = await store.import(payload, "café.json", "en");
+  assert.equal((await readFile(path.join(directory, `${first.id}.json`))).byteLength, bytes);
+  assert.equal((await store.getInfo(first.id)).status, "ready");
+  await assert.rejects(store.import(payload, "café.json", "en"), statusIs(429));
+  assert.deepEqual(await readdir(directory), [`${first.id}.json`]);
+  await store.remove(first.id);
+  assert.deepEqual(await readdir(directory), []);
+  const next = await store.import(payload, "café.json", "en");
+  assert.deepEqual((await store.export(next.id)).corpus, payload.corpus);
+});
+
+test("concurrent persistence reserves bytes before filesystem work", async t => {
+  const { directory, payload, bytes, store } = await diskQuotaFixture(t);
+  const results = await Promise.allSettled([
+    store.import(payload, "café.json", "en"),
+    store.import(payload, "café.json", "en")
+  ]);
+  assert.equal(results[0].status, "fulfilled");
+  assert.equal(results[1].status, "rejected");
+  if (results[1].status === "rejected") assert.ok(statusIs(429)(results[1].reason));
+  const files = await readdir(directory);
+  assert.equal(files.length, 1);
+  assert.equal((await readFile(path.join(directory, files[0]))).byteLength, bytes);
+});
+
+test("failed persistence releases reserved disk quota", async t => {
+  const { directory, payload, store } = await diskQuotaFixture(t);
+  await rm(directory, { recursive: true });
+  await writeFile(directory, "blocked");
+  await assert.rejects(store.import(payload, "café.json", "en"), error =>
+    statusIs(500)(error) && (error as Error).message === "Could not save the corpus.");
+  await rm(directory);
+  const info = await store.import(payload, "café.json", "en");
+  assert.equal((await store.getInfo(info.id)).status, "ready");
+  assert.deepEqual(await readdir(directory), [`${info.id}.json`]);
 });
 
 test("admission leases fail fast and release exactly once on success or thrown errors", async () => {
