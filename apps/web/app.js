@@ -18,7 +18,7 @@ function showKeyStatus(status) {
   byId("key-status").className = status.ready ? "badge ready" : "badge";
   byId("settings-status").textContent = status.source === "session"
     ? "Ready · using a session key."
-    : "Add a key for TXT preparation and verified answers. Local retrieval, import and export work without a key.";
+    : "Add a key for TXT preparation and verified answers. Server-side ParancU retrieval without OpenAI, import and export work without a key.";
   byId("remove-key").disabled = settingsBusy || status.source !== "session";
   controls();
 }
@@ -138,13 +138,13 @@ function controls() {
   byId("question").disabled = !canAsk;
   byId("ask").disabled = !canAsk;
   byId("ask").textContent = keyState.ready ? (asking ? "Finding an answer…" : "Find an answer →") : (asking ? "Retrieving evidence…" : "Find evidence →");
-  byId("question-hint").textContent = !keyState.ready ? "Retrieval-only mode: find local evidence without generating or verifying an answer." : corpus?.status === "ready"
+  byId("question-hint").textContent = !keyState.ready ? "Retrieval-only mode: server-side ParancU retrieval without OpenAI. No answer is generated or verified." : corpus?.status === "ready"
     ? "A specific question helps find the right evidence."
     : "You can ask a question once preparation is complete.";
   if (corpus?.status === "ready") {
     byId("document-status").textContent = keyState.ready
       ? "Corpus loaded and ready. Ask questions without preparing it again."
-      : "Corpus loaded and ready. Export is available. Retrieval-only mode: find local evidence without generating or verifying an answer.";
+      : "Corpus loaded and ready. Export is available. Retrieval-only mode: server-side ParancU retrieval without OpenAI. No answer is generated or verified.";
   }
 }
 
@@ -290,7 +290,7 @@ function showAnswer(data) {
   byId("asked-question").textContent = result.question;
   byId("answer-badge").textContent = retrievalOnly ? "RETRIEVAL ONLY" : result.action === "answer" ? "SUPPORT VERIFIED" : "INSUFFICIENT EVIDENCE";
   byId("answer-badge").className = result.action === "answer" ? "badge ready" : "badge";
-  byId("answer-text").textContent = retrievalOnly ? "Local ParancU retrieval only. No answer was generated or verified. Review the retrieved passages below." : result.action === "answer" ? result.answer : "No answer was supported by the passages checked. Try rephrasing your question or using another document.";
+  byId("answer-text").textContent = retrievalOnly ? "Server-side ParancU retrieval without OpenAI. No answer was generated or verified. Review the retrieved passages below." : result.action === "answer" ? result.answer : "No answer was supported by the passages checked. Try rephrasing your question or using another document.";
   if (result.action === "answer") {
     const evidenceSet = result.evidenceSet || [result.evidence];
     const evidence = evidenceSet[0];
@@ -340,7 +340,7 @@ byId("question-form").addEventListener("submit", async event => {
   byId("answer-placeholder").hidden = true;
   byId("answer-panel").setAttribute("aria-busy", "true");
   byId("activity").hidden = false;
-  byId("activity").textContent = keyState.ready ? "Retrieving evidence, generating an answer, and verifying support…" : "Retrieving local evidence only…";
+  byId("activity").textContent = keyState.ready ? "Retrieving evidence, generating an answer, and verifying support…" : "Running server-side ParancU retrieval without OpenAI…";
   try {
     const data = await api("/api/questions", { method: "POST", body: JSON.stringify({ corpusId: corpus.id, question }) });
     showAnswer(data);

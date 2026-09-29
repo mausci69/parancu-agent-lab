@@ -1505,7 +1505,7 @@ test("retrieval-only UI submits questions, displays unverified evidence and skip
       requests++;
       assert.equal(url, "/api/questions");
       assert.deepEqual(JSON.parse(options.body), { corpusId: "active", question: "What color?" });
-      assert.match(node("activity").textContent, /local evidence only/);
+      assert.match(node("activity").textContent, /server-side ParancU retrieval without OpenAI/);
       assert.equal(node("step-generate").className, "");
       assert.equal(node("step-verify").className, "");
       return { ok: true, json: async () => ({ result: { action: "retrieval_only", question: "What color?" },
