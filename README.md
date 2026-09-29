@@ -106,6 +106,81 @@ Questions run sequentially through the existing `runWorkflow`. Each completed re
 
 Both live modes initialize the existing Langfuse SDK before loading preparation/workflow modules and attempt shutdown in `finally`. A workflow failure remains the primary error if shutdown also fails; shutdown failure is reported separately. A shutdown-only failure propagates. Running questions exports full evidence and answers through the existing workflow instrumentation; preparation does not add new observations. Live execution sends real document content to OpenAI and, for workflow observations, Langfuse. Implementation/help/preflight validation does not perform these live operations.
 
+## Public runtime contract (deployment milestone 1)
+
+`npm start` runs the same TypeScript web entry point as `npm run web:local`.
+There is no compilation step or separate service process. Keep the repository
+layout intact: root workflow code imports the nested ParancU service in process.
+Use Node 22 or newer compatible with the locked dependencies, and pin the exact
+Node/npm versions in your deployment environment.
+
+Install from both committed lockfiles on the target operating system/architecture:
+
+```sh
+npm ci --include=dev
+npm --prefix services/parancu-api ci --omit=dev
+```
+
+The root intentionally retains development dependencies at runtime because its
+existing `tsx` executable launches TypeScript. Do not prune root dev dependencies
+or install the root with `--omit=dev`. This explicit install contract avoids
+changing dependency resolution or introducing a build system. The nested install
+provides `@huggingface/tokenizers` and native `onnxruntime-node`; do not copy a
+developer machine's `node_modules` into a deployment on a different platform.
+
+Supply the existing compatible multilingual E5-small assets at these exact paths:
+
+```text
+services/parancu-api/assets/models/e5/model_int8.onnx
+services/parancu-api/assets/models/e5/tokenizer.json
+services/parancu-api/assets/models/e5/tokenizer_config.json
+```
+
+Paths are resolved relative to `services/parancu-api/src/lib/embeddings.ts`, not the
+shell working directory. The model must produce 384-dimensional
+`sentence_embedding` output using the matching tokenizer. These locally supplied
+assets are not downloaded at startup or provided by npm. Preserve a versioned
+asset bundle and its checksums in your deployment provisioning; this repository
+does not establish their download source, revision, or checksums. Include
+`apps/web/` and `apps/mobile/assets/icon.png`. The process still needs write access
+to `data/web/corpora`; storage lifecycle is unchanged by this milestone.
+
+Configure variables in the process environment; `.env` files are not loaded:
+
+| Variable | Contract |
+| --- | --- |
+| `WEB_PUBLIC_ORIGIN` | Enables public mode, e.g. `https://lab.example`. Must be a canonical HTTPS origin, optionally ending in `/`; no credentials, path, query, or fragment. A non-default HTTPS port is allowed. |
+| `NODE_ENV` | Set to `production` for deployment. Startup refuses this mode without `WEB_PUBLIC_ORIGIN`. |
+| `PORT` | Platform port; takes precedence over `WEB_PORT`. |
+| `WEB_PORT` | Port when `PORT` is absent; otherwise defaults to `3000`. Ports must be decimal integers from 1 through 65535. |
+| `WEB_HOST` | Bind IP address or `localhost`; defaults to `127.0.0.1`. Use `0.0.0.0` only when required for private platform/container ingress. Binding does not change the allowed public origin. |
+
+Example behind an HTTPS reverse proxy (replace the example origin):
+
+```sh
+NODE_ENV=production WEB_PUBLIC_ORIGIN=https://lab.example WEB_HOST=0.0.0.0 PORT=8080 npm start
+```
+
+Run exactly one Node process/instance. Configure TLS at the proxy, redirect public
+HTTP to HTTPS there, preserve the canonical public `Host` header including any
+non-default port, and preserve the browser's `Origin` and `Sec-Fetch-Site` headers.
+The application accepts only that Host and, when supplied, that exact Origin;
+cross-site fetches remain rejected. Requests without Origin remain supported for
+navigation and same-origin GETs. `Forwarded` and `X-Forwarded-*` headers never
+establish trust or alter cookie flags. Public-mode cookies are always Secure,
+HttpOnly, SameSite=Strict, host-only and Path=/, even over the proxy's HTTP backend
+connection. Keep that backend connection private and prevent direct internet
+access to the Node port. The application does not terminate TLS itself.
+
+For local development leave `WEB_PUBLIC_ORIGIN` unset and do not set
+`NODE_ENV=production`. The default remains `127.0.0.1:3000`; both localhost and
+127.0.0.1 Host headers with the actual port work, with matching origins required.
+Session keys and corpus ownership remain memory-only and are lost on process
+restart. No shared `OPENAI_API_KEY` is needed for the web app. Existing model and
+Langfuse environment settings remain unchanged. This milestone adds runtime and
+origin support only; privacy/telemetry, quotas, cleanup and operational milestones
+remain prerequisites for the first public release.
+
 ## Local web application
 
 The web application uses one Node/TypeScript process, the existing ParancU preparation functions and the canonical LangGraph workflow. It serves static HTML/CSS/JavaScript and a JSON API on loopback. No React, Python backend, database or additional npm dependency is required.
@@ -127,7 +202,7 @@ Configure environment variables in the launching shell; this application does no
 | `EXPO_PUBLIC_OPENAI_MODEL` | Optional preparation model override; despite the inherited name, it is used only on the server here |
 | `OPENAI_MODEL` | Optional generation/verifier model override |
 | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` | Langfuse project credentials and endpoint |
-| `WEB_PORT` | Optional local port, default `3000` |
+| `WEB_PORT` | Optional local port, default `3000`; platform `PORT` takes precedence |
 
 The current code defaults both OpenAI model selections to `gpt-5.4-mini`. No keys are sent to the browser. Starting the web server does not prepare a document or ask questions; the existing tracing SDK initializes once for the server process. Upload/preparation and question submission trigger live OpenAI operations, and workflow traces contain full evidence and answers.
 

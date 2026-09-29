@@ -7,6 +7,7 @@ import type { PrepareResult } from "../../services/parancu-api/src/local/prepare
 import { KeyManager } from "./keyManager";
 import { SessionManager } from "./sessionManager";
 import { exportFilename, MAX_IMPORT_BYTES } from "./corpusFormat";
+import { parsePublicOrigin, readWebRuntimeConfig } from "./runtimeConfig";
 
 type ServerOptions = {
   store: CorpusStore;
@@ -14,6 +15,7 @@ type ServerOptions = {
   webDirectory: string;
   reportError?: (error: unknown) => void;
   sessions?: SessionManager;
+  publicOrigin?: string;
 };
 const staticFiles: Record<string, [string, string]> = {
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -42,6 +44,8 @@ async function readJson(request: http.IncomingMessage, limit = 8 * 1024 * 1024):
 }
 
 export function createWebServer(options: ServerOptions): http.Server {
+  const publicOrigin = parsePublicOrigin(options.publicOrigin);
+  const publicHost = publicOrigin ? new URL(publicOrigin).host : undefined;
   const reportError = options.reportError ?? console.error;
   const busyCorpora = new Set<string>();
   const sessions = options.sessions ?? new SessionManager();
@@ -57,15 +61,20 @@ export function createWebServer(options: ServerOptions): http.Server {
     void (async () => {
       const port = request.socket.localPort;
       const host = request.headers.host;
-      const secure = "encrypted" in request.socket && request.socket.encrypted === true;
+      // Public TLS terminates at the trusted deployment proxy. Never derive trust
+      // from Forwarded or X-Forwarded-* request headers.
+      const secure = Boolean(publicOrigin) || ("encrypted" in request.socket && request.socket.encrypted === true);
       const protocol = secure ? "https" : "http";
-      if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) throw new WebError(403, "Host not allowed.");
-      if ((request.headers.origin && request.headers.origin !== `${protocol}://${host}`) ||
+      if (publicHost ? host !== publicHost : host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+        throw new WebError(403, "Host not allowed.");
+      }
+      const origin = publicOrigin ?? `${protocol}://${host}`;
+      if ((request.headers.origin && request.headers.origin !== origin) ||
           request.headers["sec-fetch-site"] === "cross-site") throw new WebError(403, "Origin not allowed.");
       const { keys, setCookie, requireActive, claimCorpus, requireCorpus } = sessions.resolve(request.headers.cookie, secure);
       if (setCookie) response.setHeader("Set-Cookie", setCookie);
       await keys.context(async () => {
-        const url = new URL(request.url ?? "/", `${protocol}://${host}`);
+        const url = new URL(request.url ?? "/", origin);
         if (url.pathname === "/api/settings/openai") {
           if (request.method === "GET") { send(200, keys.status()); return; }
           if (request.method === "PUT") {
@@ -164,8 +173,7 @@ export function createWebServer(options: ServerOptions): http.Server {
 }
 
 async function main(): Promise<void> {
-  const port = Number(process.env.WEB_PORT ?? "3000");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("WEB_PORT must be a valid port number.");
+  const { port, host, publicOrigin } = readWebRuntimeConfig();
   // This is the only SDK bootstrap. Importing createWebServer in tests has no tracing side effects.
   const { langfuseSdk } = await import("../observability/langfuse.js");
   let primaryFailure = false;
@@ -180,15 +188,15 @@ async function main(): Promise<void> {
     store = new CorpusStore(path.join(root, "data/web/corpora"), {
       prepare: prepareCorpusLocal, enrich: enrichPreparedCorpusWithOpenAI
     }, console.error, KeyManager.checkContent);
-    server = createWebServer({ store, sessions, ask: createWorkflowService(), webDirectory: path.join(root, "apps/web") });
+    server = createWebServer({ store, sessions, publicOrigin, ask: createWorkflowService(), webDirectory: path.join(root, "apps/web") });
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
-      server!.listen(port, "127.0.0.1", () => {
+      server!.listen(port, host, () => {
         server!.removeListener("error", reject);
         resolve();
       });
     });
-    console.log(`ParancU Agent Lab: http://127.0.0.1:${port}`);
+    console.log(`ParancU Agent Lab: ${publicOrigin ?? `http://127.0.0.1:${port}`}`);
     console.log("Document preparation and questions use OpenAI. Press Ctrl+C to shut down after current operations finish.");
     await new Promise<void>((resolve, reject) => {
       const stop = () => { sessions.close(); cleanup(); resolve(); };

@@ -10,6 +10,7 @@ import { prepareCorpusLocal } from "../../services/parancu-api/src/local/prepare
 import type { RetrieveResult } from "../../services/parancu-api/src/local/retrieval";
 import { CorpusStore, MAX_TEXT_BYTES, WebError } from "./corpusStore";
 import { createWebServer } from "./server";
+import { parsePublicOrigin, readWebRuntimeConfig } from "./runtimeConfig";
 import { createWorkflowService } from "./workflowService";
 import { KeyManager } from "./keyManager";
 import { SessionManager, SESSION_COOKIE } from "./sessionManager";
@@ -277,6 +278,77 @@ test("HTTP validates bodies, origins, host and static allowlist before work", as
   assert.doesNotMatch(js, /innerHTML|outerHTML|insertAdjacentHTML|OPENAI_API_KEY/);
   assert.equal(calls, 0);
 });
+test("web runtime defaults, production configuration and port precedence", () => {
+  assert.deepEqual(readWebRuntimeConfig({}), { port: 3000, host: "127.0.0.1", publicOrigin: undefined });
+  assert.equal(readWebRuntimeConfig({ WEB_PORT: "3001" }).port, 3001);
+  assert.equal(readWebRuntimeConfig({ PORT: "8080", WEB_PORT: "3001" }).port, 8080);
+  assert.equal(readWebRuntimeConfig({ PORT: "8080", WEB_PORT: "ignored" }).port, 8080);
+  assert.deepEqual(readWebRuntimeConfig({ NODE_ENV: "production", WEB_PUBLIC_ORIGIN: "https://lab.example/",
+    WEB_HOST: "0.0.0.0", PORT: "8080" }), { port: 8080, host: "0.0.0.0", publicOrigin: "https://lab.example" });
+  assert.throws(() => readWebRuntimeConfig({ NODE_ENV: "production" }), /WEB_PUBLIC_ORIGIN/);
+  assert.throws(() => readWebRuntimeConfig({ WEB_HOST: "https://lab.example" }), /WEB_HOST/);
+  for (const port of ["", "0", "65536", "1.5", "NaN", " 3000", "3e3"]) {
+    assert.throws(() => readWebRuntimeConfig({ PORT: port, WEB_PORT: "3000" }), /PORT/);
+    assert.throws(() => readWebRuntimeConfig({ WEB_PORT: port }), /PORT/);
+  }
+  for (const origin of ["", "http://lab.example", "https://user:pass@lab.example", "https://lab.example/path",
+    "https://lab.example?x=1", "https://lab.example#fragment", "https://lab.example?", "https://lab.example/#",
+    "https://lab.example/../", " https://lab.example"]) assert.throws(() => parsePublicOrigin(origin), /WEB_PUBLIC_ORIGIN/);
+  assert.equal(parsePublicOrigin("https://lab.example:8443"), "https://lab.example:8443");
+});
+
+for (const publicOrigin of [undefined, "https://lab.example", "https://lab.example:8443"]) {
+  test(`HTTP origin boundary and cookies: ${publicOrigin ?? "local"}`, async t => {
+    const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+    const server = createWebServer({ store, publicOrigin, ask: service(), webDirectory, reportError: noLog });
+    t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    const host = publicOrigin ? new URL(publicOrigin).host : `127.0.0.1:${port}`;
+    const origin = publicOrigin ?? `http://${host}`;
+    const request = (headers: Record<string, string> = {}) => new Promise<{
+      status: number | undefined; headers: http.IncomingHttpHeaders;
+    }>((resolve, reject) => {
+      http.get({ hostname: "127.0.0.1", port, path: "/api/settings/openai", headers: { Host: host, ...headers } }, response => {
+        response.resume();
+        response.on("end", () => resolve({ status: response.statusCode, headers: response.headers }));
+        response.on("error", reject);
+      }).on("error", reject);
+    });
+    // Simulate HTTPS termination at a proxy with a plain HTTP backend connection.
+    const accepted = await request({ Origin: origin });
+    assert.equal(accepted.status, 200);
+    const cookie = accepted.headers["set-cookie"]![0];
+    assert.match(cookie, /^parancu_session=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\//);
+    assert.equal(cookie.includes("; Secure"), Boolean(publicOrigin));
+    assert.doesNotMatch(cookie, /Domain=|Expires=|Max-Age=/);
+    assert.equal(accepted.headers["cache-control"], "no-store");
+    assert.match(String(accepted.headers["content-security-policy"]), /frame-ancestors 'none'/);
+    const resumed = await request({ Cookie: cookie.split(";")[0] });
+    assert.equal(resumed.status, 200, "same-origin GETs and navigation may omit Origin");
+    assert.equal(resumed.headers["set-cookie"], undefined);
+    const invalid: Record<string, string>[] = [
+      { Host: "wrong.example" }, { Origin: "https://wrong.example" }, { Origin: "null" },
+      { Origin: origin, "Sec-Fetch-Site": "cross-site" },
+      { Host: "wrong.example", "X-Forwarded-Host": host, "X-Forwarded-Proto": "https", Forwarded: `host=${host};proto=https` },
+      { Origin: "https://wrong.example", "X-Forwarded-Host": host, "X-Forwarded-Proto": "https" }
+    ];
+    if (publicOrigin) invalid.push({ Host: `localhost:${port}` }, { Origin: `http://${host}` });
+    for (const headers of invalid) {
+      const rejected = await request(headers);
+      assert.equal(rejected.status, 403);
+      assert.equal(rejected.headers["set-cookie"], undefined);
+    }
+    const forwarded = await request({ "X-Forwarded-Proto": publicOrigin ? "http" : "https", "X-Forwarded-Host": "wrong.example" });
+    assert.equal(forwarded.status, 200);
+    assert.equal(forwarded.headers["set-cookie"]![0].includes("; Secure"), Boolean(publicOrigin));
+    if (!publicOrigin) {
+      assert.equal((await request({ Host: `localhost:${port}`, Origin: `http://localhost:${port}` })).status, 200);
+      assert.equal((await request({ Host: `localhost:${port}`, Origin: `http://127.0.0.1:${port}` })).status, 403);
+    }
+  });
+}
+
 function enriched() {
   const corpus = prepareCorpusLocal(source, { docId: "legacy-document" });
   for (const chunk of corpus.chunks) Object.assign(chunk, {
