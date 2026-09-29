@@ -24,7 +24,7 @@ const staticFiles: Record<string, [string, string]> = {
   "/app.js": ["app.js", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
   // Keep the official ParancU asset independent of the caller's web root.
-  "/icon.png": [path.resolve(__dirname, "../../apps/mobile/assets/icon.png"), "image/png"]
+  "/icon.png": [path.resolve(__dirname, "../../apps/web/icon.png"), "image/png"]
 };
 
 async function readJson(request: http.IncomingMessage, limit: number): Promise<Record<string, unknown>> {
