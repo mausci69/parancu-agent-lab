@@ -7,7 +7,7 @@ import type { PrepareResult } from "../../services/parancu-api/src/local/prepare
 import { KeyManager } from "./keyManager";
 import { SessionManager } from "./sessionManager";
 import { exportFilename } from "./corpusFormat";
-import { parsePublicOrigin, readWebRuntimeConfig, readWebShutdownTimeout } from "./runtimeConfig";
+import { parsePublicOrigin, readWebRuntimeConfig, readWebShutdownTimeout, validateCorpusDirectory } from "./runtimeConfig";
 import { readWebLimits, WebResources, QUESTION_REQUEST_BYTES, TXT_ENVELOPE_BYTES } from "./resourceLimits";
 
 type ServerOptions = {
@@ -225,6 +225,7 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
 }
 
 export async function purgeWebCorpora(corpusDirectory: string): Promise<void> {
+  validateCorpusDirectory(corpusDirectory);
   // Remove the configured tree directly; recursive rm does not follow child symlinks.
   await rm(corpusDirectory, { recursive: true, force: true });
   await mkdir(corpusDirectory, { recursive: true, mode: 0o700 });

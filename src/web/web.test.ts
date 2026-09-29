@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -465,7 +466,7 @@ test("web runtime defaults, production configuration and port precedence", () =>
 });
 
 test("web corpus directory overrides resolve to absolute paths and reject blank values", () => {
-  for (const value of ["custom-corpora", path.join(os.tmpdir(), "custom-corpora")]) {
+  for (const value of ["custom/corpora", path.join(os.tmpdir(), "custom", "corpora")]) {
     const { corpusDirectory } = readWebRuntimeConfig({ WEB_CORPUS_DIR: value });
     assert.equal(corpusDirectory, path.resolve(value));
     assert.equal(path.isAbsolute(corpusDirectory), true);
@@ -473,6 +474,41 @@ test("web corpus directory overrides resolve to absolute paths and reject blank 
   for (const value of ["", " ", "\t\n"]) {
     assert.throws(() => readWebRuntimeConfig({ WEB_CORPUS_DIR: value }), /WEB_CORPUS_DIR/);
   }
+});
+
+test("unsafe corpus directories are rejected before recursive removal", async t => {
+  const directory = await tempDirectory(t);
+  const alias = path.join(directory, "corpora");
+  await symlink(os.homedir(), alias);
+  const remove = t.mock.method(fsPromises, "rm", async () => assert.fail("unsafe path reached rm"));
+  try {
+    for (const value of ["/", os.homedir(), os.tmpdir(), process.cwd(), path.join(directory, "other"), alias]) {
+      const fixedError = { message: "WEB_CORPUS_DIR must designate a dedicated corpora directory." };
+      assert.throws(() => readWebRuntimeConfig({ WEB_CORPUS_DIR: value }), fixedError);
+      await assert.rejects(purgeWebCorpora(value), fixedError);
+    }
+    assert.equal(remove.mock.callCount(), 0);
+  } finally { remove.mock.restore(); }
+});
+
+test("missing corpus directory resolves parent symlinks before rejecting a protected target", async t => {
+  const directory = await tempDirectory(t);
+  const parent = path.join(directory, "parent");
+  const link = path.join(directory, "link");
+  await mkdir(parent);
+  await symlink(parent, link);
+  const target = path.join(parent, "corpora");
+  const configured = path.join(link, "corpora");
+  await assert.rejects(readFile(target), { code: "ENOENT" });
+  // Simulate a protected cwd whose final directory is absent, without changing cwd.
+  const cwd = t.mock.method(process, "cwd", () => target);
+  const remove = t.mock.method(fsPromises, "rm", async () => assert.fail("unsafe path reached rm"));
+  try {
+    const fixedError = { message: "WEB_CORPUS_DIR must designate a dedicated corpora directory." };
+    assert.throws(() => readWebRuntimeConfig({ WEB_CORPUS_DIR: configured }), fixedError);
+    await assert.rejects(purgeWebCorpora(configured), fixedError);
+    assert.equal(remove.mock.callCount(), 0);
+  } finally { remove.mock.restore(); cwd.mock.restore(); }
 });
 
 test("startup corpus purge removes stale contents without following symlinks outside the directory", async t => {

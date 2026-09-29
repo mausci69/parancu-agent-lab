@@ -1,6 +1,30 @@
 import { isIP } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { realpathSync } from "node:fs";
 import path from "node:path";
+
+export function validateCorpusDirectory(directory: string): void {
+  const invalid = () => new Error("WEB_CORPUS_DIR must designate a dedicated corpora directory.");
+  const canonical = (value: string) => {
+    let ancestor = path.resolve(value);
+    const suffix: string[] = [];
+    while (true) {
+      try { return path.join(realpathSync(ancestor), ...suffix); }
+      catch (error) {
+        const parent = path.dirname(ancestor);
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === ancestor) throw invalid();
+        suffix.unshift(path.basename(ancestor));
+        ancestor = parent;
+      }
+    }
+  };
+  const resolved = path.resolve(directory);
+  if (!directory.trim() || directory.includes("\0") || path.basename(resolved) !== "corpora") throw invalid();
+  const actual = canonical(resolved);
+  const forbidden = [path.parse(resolved).root, homedir(), tmpdir(), process.cwd()];
+  if (path.basename(actual) !== "corpora" ||
+      forbidden.some(value => resolved === path.resolve(value) || actual === canonical(value))) throw invalid();
+}
 
 export function readWebShutdownTimeout(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.WEB_SHUTDOWN_TIMEOUT_MS ?? "15000";
@@ -54,5 +78,6 @@ export function readWebRuntimeConfig(env: NodeJS.ProcessEnv = process.env) {
   const corpusDirectory = env.WEB_CORPUS_DIR === undefined
     ? path.join(tmpdir(), "parancu-agent-lab", "corpora")
     : path.resolve(env.WEB_CORPUS_DIR);
+  validateCorpusDirectory(corpusDirectory);
   return { port, host, publicOrigin, corpusDirectory };
 }
