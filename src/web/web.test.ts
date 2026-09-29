@@ -19,6 +19,9 @@ import { loadOpenAIKey } from "../../services/parancu-api/src/local/openaiKeySto
 import { requestOpenAI } from "../../services/parancu-api/src/local/openaiRequest";
 import { generateResponse } from "../responder/responseAgent";
 import { verifyEvidence } from "../verifier/evidenceVerifier";
+import { AdmissionGate, DEFAULT_WEB_LIMITS, readWebLimits, WebResources } from "./resourceLimits";
+
+const statusIs = (status: number) => (error: unknown) => error instanceof WebError && error.status === status;
 
 const source = "Atlas is blue. Nova is red. Atlas weighs one kilogram. Nova is lighter.";
 const input = { name: "example.txt", text: source, language: "en" as const };
@@ -100,7 +103,7 @@ test("preparation exposes preparing, then persists ready; a new store reuses it 
   assert.equal(info.status, "preparing");
   assert.equal((await store.getInfo(info.id)).status, "preparing");
   await assert.rejects(store.getReady(info.id), (error: unknown) => error instanceof WebError && error.status === 409);
-  assert.throws(() => store.create(input), (error: unknown) => error instanceof WebError && error.status === 409);
+  assert.throws(() => store.create(input), (error: unknown) => error instanceof WebError && error.status === 429);
   gate.resolve();
   await store.drain();
   const ready = await store.getReady(info.id);
@@ -136,6 +139,9 @@ test("storage failure never reports ready", async t => {
   await store.drain();
   assert.equal((await store.getInfo(info.id)).status, "failed");
   assert.equal(await readFile(blocked, "utf8"), "existing file");
+  const retry = store.create(input);
+  await store.drain();
+  assert.equal((await store.getInfo(retry.id)).status, "failed", "storage failure releases the preparation slot");
 });
 
 test("invalid uploads and path IDs fail before preparation", async t => {
@@ -242,7 +248,7 @@ test("HTTP rejects duplicate questions while one is running", async t => {
   const first = post(base, "/api/questions", body);
   await started.promise;
   const duplicate = await post(base, "/api/questions", body);
-  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.status, 429);
   const foreign = await globalThis.fetch(base + "/api/questions", {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
   });
@@ -402,7 +408,7 @@ test("sessions validate cookies, bound capacity, expire credentials and close re
     `${cookie}; ${cookie}`, `${SESSION_COOKIE} =${cookie.split("=")[1]}`, `${SESSION_COOKIE}="${cookie.split("=")[1]}"`]) {
     assert.throws(() => sessions.resolve(invalid), (error: unknown) => error instanceof WebError && error.status === 400);
   }
-  assert.throws(() => sessions.resolve(undefined), (error: unknown) => error instanceof WebError && error.status === 503);
+  assert.throws(() => sessions.resolve(undefined), (error: unknown) => error instanceof WebError && error.status === 429);
   assert.equal(first.keys.status().ready, true, "capacity must not evict an active key");
   await first.keys.context(async () => {
     now = 100;
@@ -454,7 +460,10 @@ test("browser sessions isolate settings, question credentials and background TXT
     const page = await globalThis.fetch(base);
     await page.text();
     assert.equal(page.headers.get("cache-control"), "no-store");
-    const cookie = page.headers.get("set-cookie")!.split(";")[0];
+    assert.equal(page.headers.get("set-cookie"), null);
+    const settingsResponse = await globalThis.fetch(base + "/api/settings/openai");
+    await settingsResponse.text();
+    const cookie = settingsResponse.headers.get("set-cookie")!.split(";")[0];
     return (route: string, method = "GET", body?: unknown) => globalThis.fetch(base + route, {
       method, headers: { Cookie: cookie, "Content-Type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) })
@@ -1115,4 +1124,306 @@ test("retrieval-only UI submits questions, displays unverified evidence and skip
   await node("question-form").listeners.get("submit")({ preventDefault() {} });
   assert.equal(node("evidence-count").textContent, "0");
   assert.equal(node("evidence-list").children[0].textContent, "ParancU returned no candidates.");
+});
+
+
+test("resource configuration has conservative defaults and rejects invalid overrides", () => {
+  assert.deepEqual(readWebLimits({}), { maxTextBytes: 1048576, maxImportBytes: 8388608,
+    maxChunks: 256, maxCorpora: 32, maxPreparations: 1, maxQuestions: 2, maxRetrievals: 2 });
+  const env = { WEB_MAX_TEXT_BYTES: "12", WEB_MAX_IMPORT_BYTES: "13", WEB_MAX_CHUNKS: "14",
+    WEB_MAX_CORPORA: "15", WEB_MAX_PREPARATIONS: "2", WEB_MAX_QUESTIONS: "3", WEB_MAX_RETRIEVALS: "4" };
+  assert.deepEqual(readWebLimits(env), { maxTextBytes: 12, maxImportBytes: 13, maxChunks: 14,
+    maxCorpora: 15, maxPreparations: 2, maxQuestions: 3, maxRetrievals: 4 });
+  for (const key of Object.keys(env)) for (const value of ["", "0", "-1", "1.5", " 2", "2e2", "Infinity", "9007199254740992"]) {
+    assert.throws(() => readWebLimits({ [key]: value }), new RegExp(key));
+  }
+});
+
+test("admission leases fail fast and release exactly once on success or thrown errors", async () => {
+  const gate = new AdmissionGate(1);
+  const release = gate.acquire();
+  await assert.rejects(gate.run(() => assert.fail("must not queue")), statusIs(429));
+  release(); release();
+  assert.equal(await gate.run(() => 42), 42);
+  await assert.rejects(gate.run(() => { throw new Error("sync"); }), /sync/);
+  await assert.rejects(gate.run(async () => { throw new Error("async"); }), /async/);
+  const last = gate.acquire();
+  assert.throws(() => gate.acquire(), statusIs(429));
+  last();
+});
+
+test("static assets, unmatched methods/routes and unowned reads never allocate a session", async t => {
+  const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const sessions = new SessionManager(1);
+  const base = await startServer(t, store, service(), configuredKeys(), [], sessions);
+  // The only slot is occupied by the fixture; cookie-free requests must still work.
+  for (const route of ["/", "/app.js", "/styles.css", "/icon.png"]) {
+    const response = await globalThis.fetch(base + route);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("set-cookie"), null);
+    await response.arrayBuffer();
+  }
+  for (const [route, method] of [["/missing", "GET"], ["/health", "GET"],
+    ["/api/corpora/import", "GET"], ["/api/settings/openai", "POST"], ["/app.js", "POST"],
+    ["/api/corpora/00000000-0000-4000-8000-000000000000/export", "GET"]]) {
+    const response = await globalThis.fetch(base + route, { method });
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get("set-cookie"), null);
+    await response.text();
+  }
+  const full = await globalThis.fetch(base + "/api/settings/openai");
+  assert.equal(full.status, 429);
+  assert.equal(full.headers.get("set-cookie"), null);
+  assert.equal((await fetch(base + "/api/settings/openai")).status, 200, "existing session is preserved");
+});
+
+test("TXT UTF-8 byte and chunk limits reject before enrichment; admitted validation errors release capacity", async t => {
+  const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxTextBytes: 12, maxChunks: 1 });
+  let preparations = 0, enrichments = 0;
+  const store = new CorpusStore(await tempDirectory(t), {
+    prepare: (text, options) => { preparations++; return prepareCorpusLocal(text, options); },
+    enrich: async corpus => { enrichments++; return corpus; }
+  }, noLog, undefined, resources);
+  const base = await startServer(t, store);
+  assert.equal((await post(base, "/api/corpora", { ...input, text: "é".repeat(7) })).status, 413);
+  assert.equal(preparations, 0);
+  assert.equal((await post(base, "/api/corpora", { ...input, text: "A. B. C. D." })).status, 413);
+  assert.equal(enrichments, 0);
+  assert.equal((await post(base, "/api/corpora", { ...input, text: "", language: "fr" })).status, 400);
+  const accepted = await post(base, "/api/corpora", { ...input, text: "é".repeat(6) });
+  assert.equal(accepted.status, 202, "exact byte boundary is accepted");
+  const info = await accepted.json();
+  await store.drain();
+  assert.equal((await store.getReady(info.id)).corpus.chunks[0].text, "é".repeat(6));
+  assert.equal(enrichments, 1);
+});
+
+test("import byte limit covers Content-Length and streamed bodies; exact limit imports unchanged", async t => {
+  const body = { corpus: enriched(), name: "example.json", language: "en" };
+  const json = JSON.stringify(body);
+  const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxImportBytes: Buffer.byteLength(json) });
+  const store = new CorpusStore(await tempDirectory(t), {
+    prepare: () => { throw new Error("must not prepare"); }, enrich: async () => { throw new Error("must not enrich"); }
+  }, noLog, undefined, resources);
+  const base = await startServer(t, store);
+  const tooLarge = await fetch(base + "/api/corpora/import", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: json + " "
+  });
+  assert.equal(tooLarge.status, 413);
+  // No Content-Length: the streaming byte counter must independently stop overflow.
+  const streamed = await new Promise<number | undefined>((resolve, reject) => {
+    const request = http.request(base + "/api/corpora/import", { method: "POST", headers: {
+      "Content-Type": "application/json", Cookie: browserCookies.get(base)!, "Transfer-Encoding": "chunked"
+    } }, response => { response.resume(); response.on("end", () => resolve(response.statusCode)); });
+    request.on("error", reject);
+    request.write(json);
+    request.end(" ");
+  });
+  assert.equal(streamed, 413);
+  const response = await post(base, "/api/corpora/import", body);
+  assert.equal(response.status, 201);
+  const info = await response.json();
+  assert.deepEqual((await store.export(info.id)).corpus, body.corpus);
+});
+
+test("import chunk caps return 413 before schema validation and corpus reservations release on invalid import", async t => {
+  const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxChunks: 1, maxCorpora: 1 });
+  const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog, undefined, resources);
+  const base = await startServer(t, store);
+  assert.equal((await post(base, "/api/corpora/import", { corpus: { chunks: [{}, {}] } })).status, 413);
+  assert.equal((await post(base, "/api/corpora/import", { corpus: { formatVersion: 1, corpus: { chunks: [{}, {}] } } })).status, 413);
+  assert.equal((await post(base, "/api/corpora/import", { corpus: {} })).status, 400);
+  const corpus = enriched();
+  corpus.chunks = corpus.chunks.slice(0, 1);
+  const accepted = await post(base, "/api/corpora/import", { corpus, name: "one.json", language: "en" });
+  assert.equal(accepted.status, 201);
+  const id = (await accepted.json()).id;
+  assert.equal((await post(base, "/api/corpora/import", { corpus, name: "two.json", language: "en" })).status, 429);
+  assert.equal((await fetch(base + "/api/corpora/" + id)).status, 200);
+  assert.deepEqual((await store.export(id)).corpus, corpus);
+});
+
+test("corpus reservations cover concurrent imports and are released after persistence or reload failure", async t => {
+  const directory = await tempDirectory(t);
+  const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxCorpora: 1 });
+  const store = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog, undefined, resources);
+  const first = store.import(enriched(), "first.json", "en");
+  await assert.rejects(store.import(enriched(), "second.json", "en"), statusIs(429));
+  const info = await first;
+  assert.deepEqual((await store.export(info.id)).corpus, enriched());
+  const blocked = path.join(directory, "blocked");
+  await writeFile(blocked, "file");
+  const failed = new CorpusStore(blocked, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog, undefined,
+    new WebResources({ ...DEFAULT_WEB_LIMITS, maxCorpora: 1 }));
+  await assert.rejects(failed.import(enriched(), "a.json", "en"));
+  assert.doesNotThrow(() => failed.assertCorpusCapacity());
+  await assert.rejects(failed.import(enriched(), "b.json", "en"), error => !(error instanceof WebError && error.status === 429));
+  const reloaded = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog, undefined,
+    new WebResources({ ...DEFAULT_WEB_LIMITS, maxCorpora: 1 }));
+  await assert.rejects(reloaded.getReady("00000000-0000-4000-8000-000000000000"), statusIs(404));
+  const copies = await Promise.all([reloaded.getReady(info.id), reloaded.getReady(info.id)]);
+  assert.deepEqual(copies[0], copies[1], "one load/reservation serves the same corpus");
+});
+
+test("preparation concurrency is configurable, fails fast with 429, and releases on success and upstream failure", async t => {
+  const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxPreparations: 2 });
+  const gates = [deferred(), deferred()];
+  let calls = 0;
+  const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async corpus => {
+    const index = calls++;
+    if (index < 2) await gates[index].promise;
+    if (index === 1) throw new Error("PRIVATE_OPENAI_FAILURE");
+    return corpus;
+  } }, noLog, undefined, resources);
+  const base = await startServer(t, store);
+  const first = await post(base, "/api/corpora", input);
+  const second = await post(base, "/api/corpora", input);
+  assert.equal(first.status, 202); assert.equal(second.status, 202);
+  const firstId = (await first.json()).id, secondId = (await second.json()).id;
+  try {
+    assert.equal((await post(base, "/api/corpora", input)).status, 429);
+    assert.equal(calls, 2, "rejected work is not queued");
+  } finally { gates.forEach(gate => gate.resolve()); }
+  await store.drain();
+  assert.equal((await store.getInfo(firstId)).status, "ready");
+  assert.equal((await store.getInfo(secondId)).status, "failed");
+  assert.equal((await post(base, "/api/corpora", input)).status, 202);
+  await store.drain();
+  assert.equal(calls, 3);
+});
+
+for (const failure of ["none", "retrieve", "generate", "verify"] as const) {
+  test("question admission is released after " + failure + " and validation failure", async t => {
+    const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxQuestions: 1 });
+    const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog, undefined, resources);
+    const one = await store.import(enriched(), "one.json", "en");
+    const two = await store.import(enriched(), "two.json", "en");
+    const started = deferred(), finish = deferred();
+    let block = true, shouldFail = true, retrievalCalls = 0;
+    const ask = createWorkflowService({
+      retrieveCandidates: async () => {
+        retrievalCalls++;
+        if (block) { started.resolve(); await finish.promise; }
+        if (shouldFail && failure === "retrieve") throw new Error("PRIVATE_FAILURE");
+        return [candidate(0, "Atlas is blue.")];
+      },
+      generateAnswer: async () => { if (shouldFail && failure === "generate") throw new Error("PRIVATE_FAILURE"); return "Blue"; },
+      verifyAnswer: async () => { if (shouldFail && failure === "verify") throw new Error("PRIVATE_FAILURE"); return { supported: true, reason: "Supported" }; }
+    }, resources);
+    const base = await startServer(t, store, ask, configuredKeys(), [one.id, two.id]);
+    const body = { corpusId: one.id, question: "Color?" };
+    const first = post(base, "/api/questions", body);
+    await started.promise;
+    try {
+      assert.equal((await post(base, "/api/questions", { ...body, corpusId: two.id })).status, 429);
+      assert.equal(retrievalCalls, 1);
+    } finally { finish.resolve(); }
+    assert.equal((await first).status, failure === "none" ? 200 : 500);
+    block = false; shouldFail = false;
+    assert.equal((await post(base, "/api/questions", { ...body, question: "" })).status, 400);
+    assert.equal((await post(base, "/api/questions", body, { Cookie: "parancu_session=invalid" })).status, 400);
+    assert.equal((await fetch(base + "/api/questions", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{" })).status, 400);
+    assert.equal((await post(base, "/api/questions", { ...body, corpusId: "unknown" })).status, 404);
+    assert.equal((await post(base, "/api/questions", body)).status, 200);
+  });
+}
+
+for (const fail of [false, true]) {
+  test("retrieval gate is shared by keyed workflow and key-free retrieval; failure=" + fail, async t => {
+    const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxQuestions: 2, maxRetrievals: 1 });
+    const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog, undefined, resources);
+    const one = await store.import(enriched(), "one.json", "en");
+    const two = await store.import(enriched(), "two.json", "en");
+    const started = deferred(), finish = deferred();
+    let blocking = true, calls = 0;
+    const ask = createWorkflowService({
+      retrieveCandidates: async () => {
+        calls++;
+        if (blocking) { started.resolve(); await finish.promise; if (fail) throw new Error("PRIVATE_RETRIEVAL_ERROR"); }
+        return [candidate(0, "Atlas is blue.")];
+      },
+      generateAnswer: async () => "Blue", verifyAnswer: async () => ({ supported: true, reason: "Supported" })
+    }, resources);
+    const base = await startServer(t, store, ask, configuredKeys(), [one.id, two.id]);
+    const first = post(base, "/api/questions", { corpusId: one.id, question: "Color?" });
+    await started.promise;
+    await fetch(base + "/api/settings/openai", { method: "DELETE" });
+    try {
+      assert.equal((await post(base, "/api/questions", { corpusId: two.id, question: "Color?" })).status, 429);
+      assert.equal(calls, 1);
+    } finally { finish.resolve(); }
+    assert.equal((await first).status, fail ? 500 : 200);
+    blocking = false;
+    const response = await post(base, "/api/questions", { corpusId: two.id, question: "Color?" });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).result.action, "retrieval_only");
+  });
+}
+
+test("diagnostic recovery also holds the shared retrieval admission slot", async () => {
+  const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxRetrievals: 1 });
+  const started = deferred(), finish = deferred();
+  const corpus = enriched();
+  let calls = 0;
+  const ask = createWorkflowService({
+    retrieveCandidates: async () => {
+      if (++calls === 2) { started.resolve(); await finish.promise; return [candidate(1, corpus.chunks[1].text)]; }
+      return [candidate(0, corpus.chunks[0].text)];
+    },
+    generateAnswer: async () => "Answer",
+    verifyAnswer: async (_q, _a, _e, context) => ({ supported: Boolean(context), reason: "Checked", missingConcepts: context ? [] : ["color"] }),
+    checkComplement: async () => ({ addsMissingSupport: true, reason: "Adds support" })
+  }, resources);
+  const first = ask("Color?", corpus);
+  await started.promise;
+  try { await assert.rejects(ask("Color?", corpus, true), statusIs(429)); }
+  finally { finish.resolve(); }
+  assert.equal((await first).result.action, "answer");
+  assert.equal((await ask("Color?", corpus, true)).result.action, "retrieval_only");
+});
+
+
+test("upload/import body admission fails fast and releases after import failure", async t => {
+  const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const original = store.import.bind(store);
+  const started = deferred(), finish = deferred();
+  let block = true, calls = 0;
+  t.mock.method(store, "import", async (...args: Parameters<CorpusStore["import"]>) => {
+    calls++;
+    if (block) { started.resolve(); await finish.promise; throw new Error("PRIVATE_STORAGE_FAILURE"); }
+    return original(...args);
+  });
+  const base = await startServer(t, store);
+  const body = { corpus: enriched(), name: "one.json", language: "en" };
+  const first = post(base, "/api/corpora/import", body);
+  await started.promise;
+  try {
+    assert.equal((await post(base, "/api/corpora/import", body)).status, 429);
+    assert.equal((await post(base, "/api/corpora", input)).status, 429, "uploads share the body-admission gate");
+    assert.equal(calls, 1);
+  } finally { finish.resolve(); }
+  const failed = await first;
+  assert.equal(failed.status, 500);
+  assert.doesNotMatch(await failed.text(), /PRIVATE_STORAGE_FAILURE/);
+  block = false;
+  assert.equal((await post(base, "/api/corpora/import", body)).status, 201);
+});
+
+test("synchronous preparation errors and credential validation release the preparation slot", async t => {
+  const resources = new WebResources({ ...DEFAULT_WEB_LIMITS, maxCorpora: 1 });
+  let rejectContent = true, failPrepare = true;
+  const store = new CorpusStore(await tempDirectory(t), {
+    prepare: (text, options) => { if (failPrepare) throw new Error("split failure"); return prepareCorpusLocal(text, options); },
+    enrich: async c => c
+  }, noLog, () => { if (rejectContent) throw new Error("content rejected"); }, resources);
+  assert.throws(() => store.create(input), /content rejected/);
+  rejectContent = false;
+  assert.throws(() => store.create(input), /split failure/);
+  failPrepare = false;
+  const info = store.create(input);
+  await store.drain();
+  assert.equal((await store.getInfo(info.id)).status, "ready");
+  // Retained corpus capacity is separate from a transient preparation permit.
+  const release = resources.preparations.acquire();
+  release();
 });

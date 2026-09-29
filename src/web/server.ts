@@ -6,8 +6,9 @@ import type { WebWorkflowResult } from "./workflowService";
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
 import { KeyManager } from "./keyManager";
 import { SessionManager } from "./sessionManager";
-import { exportFilename, MAX_IMPORT_BYTES } from "./corpusFormat";
+import { exportFilename } from "./corpusFormat";
 import { parsePublicOrigin, readWebRuntimeConfig } from "./runtimeConfig";
+import { readWebLimits, WebResources, QUESTION_REQUEST_BYTES, TXT_ENVELOPE_BYTES } from "./resourceLimits";
 
 type ServerOptions = {
   store: CorpusStore;
@@ -25,13 +26,16 @@ const staticFiles: Record<string, [string, string]> = {
   "/icon.png": [path.resolve(__dirname, "../../apps/mobile/assets/icon.png"), "image/png"]
 };
 
-async function readJson(request: http.IncomingMessage, limit = 8 * 1024 * 1024): Promise<Record<string, unknown>> {
+async function readJson(request: http.IncomingMessage, limit: number): Promise<Record<string, unknown>> {
+  const declared = request.headers["content-length"];
+  if (declared !== undefined && Number(declared) > limit) throw new WebError(413, "The request is too large.");
   if (request.headers["content-type"]?.split(";")[0].trim() !== "application/json") {
     throw new WebError(415, "A JSON request body is required.");
   }
   const buffers: Buffer[] = [];
   let bytes = 0;
-  for await (const chunk of request) {
+  // Do not destroy the socket on overflow: the caller must still send HTTP 413.
+  for await (const chunk of request.iterator({ destroyOnReturn: false })) {
     bytes += chunk.length;
     if (bytes > limit) throw new WebError(413, "The request is too large.");
     buffers.push(Buffer.from(chunk));
@@ -44,6 +48,8 @@ async function readJson(request: http.IncomingMessage, limit = 8 * 1024 * 1024):
 }
 
 export function createWebServer(options: ServerOptions): http.Server {
+  const resources = options.store.resources;
+  const limits = resources.limits;
   const publicOrigin = parsePublicOrigin(options.publicOrigin);
   const publicHost = publicOrigin ? new URL(publicOrigin).host : undefined;
   const reportError = options.reportError ?? console.error;
@@ -71,97 +77,121 @@ export function createWebServer(options: ServerOptions): http.Server {
       const origin = publicOrigin ?? `${protocol}://${host}`;
       if ((request.headers.origin && request.headers.origin !== origin) ||
           request.headers["sec-fetch-site"] === "cross-site") throw new WebError(403, "Origin not allowed.");
-      const { keys, setCookie, requireActive, claimCorpus, requireCorpus } = sessions.resolve(request.headers.cookie, secure);
-      if (setCookie) response.setHeader("Set-Cookie", setCookie);
-      await keys.context(async () => {
-        const url = new URL(request.url ?? "/", origin);
-        if (url.pathname === "/api/settings/openai") {
-          if (request.method === "GET") { send(200, keys.status()); return; }
-          if (request.method === "PUT") {
-            const body = await readJson(request, 2048);
-            try { keys.set(body.key); }
-            finally { delete body.key; }
-            send(200, keys.status()); return;
-          }
-          if (request.method === "DELETE") { keys.remove(); send(200, keys.status()); return; }
-        }
-        if (request.method === "GET" && Object.hasOwn(staticFiles, url.pathname)) {
-          const [file, type] = staticFiles[url.pathname];
-          const content = await readFile(path.isAbsolute(file) ? file : path.join(options.webDirectory, file));
-          response.writeHead(200, { "Content-Type": type });
-          response.end(content);
-          return;
-        }
-        if (request.method === "POST" && url.pathname === "/api/corpora") {
-          const body = await readJson(request);
-          requireActive();
-          keys.require();
-          keys.checkContent(body);
-          // CorpusStore owns runtime validation; browser input is never trusted.
-          const info = keys.run(() => options.store.create(body as unknown as Parameters<CorpusStore["create"]>[0]));
-          claimCorpus(info.id);
-          send(202, info);
-          return;
-        }
-        if (request.method === "POST" && url.pathname === "/api/corpora/import") {
-          const body = await readJson(request, MAX_IMPORT_BYTES);
-          requireActive();
-          keys.checkContent(body);
-          const info = await options.store.import(body.corpus, body.name, body.language);
-          // Import may outlive the initiating session; never revive its ownership.
-          claimCorpus(info.id);
-          send(201, info);
-          return;
-        }
-        const exportMatch = /^\/api\/corpora\/([^/]+)\/export$/.exec(url.pathname);
-        if (request.method === "GET" && exportMatch) {
-          requireCorpus(exportMatch[1]);
-          const payload = await options.store.export(exportMatch[1]);
-          requireCorpus(exportMatch[1]);
-          keys.checkContent(payload);
-          response.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
-            "Content-Disposition": `attachment; filename="${exportFilename(payload.sourceFilename)}"` });
-          response.end(JSON.stringify(payload, null, 2));
-          return;
-        }
-        const corpusMatch = /^\/api\/corpora\/([^/]+)$/.exec(url.pathname);
-        if (request.method === "GET" && corpusMatch) {
-          requireCorpus(corpusMatch[1]);
-          const info = await options.store.getInfo(corpusMatch[1]);
-          requireCorpus(corpusMatch[1]);
-          keys.checkContent(info);
-          send(200, info);
-          return;
-        }
-        if (request.method === "POST" && url.pathname === "/api/questions") {
-          const body = await readJson(request);
-          keys.checkContent(body);
-          if (typeof body.corpusId !== "string" || typeof body.question !== "string" ||
-              !body.question.trim() || body.question.length > 4000) {
-            throw new WebError(400, "Provide a corpus and a question between 1 and 4,000 characters.");
-          }
-          requireCorpus(body.corpusId);
-          const { info, corpus } = await options.store.getReady(body.corpusId);
-          requireCorpus(body.corpusId);
-          keys.checkContent({ info, corpus });
-          if (busyCorpora.has(info.id)) throw new WebError(409, "A question is already being processed for this document.");
-          busyCorpora.add(info.id);
-          try {
-            const question = body.question.trim();
-            const result = keys.status().ready
-              ? await keys.run(() => options.ask(question, corpus))
-              : await options.ask(question, corpus, true);
-            requireCorpus(body.corpusId);
-            keys.checkContent(result);
-            send(200, { corpus: info, ...result });
-          } finally { busyCorpora.delete(info.id); }
-          return;
-        }
+      const url = new URL(request.url ?? "/", origin);
+      if (request.method === "GET" && Object.hasOwn(staticFiles, url.pathname)) {
+        const [file, type] = staticFiles[url.pathname];
+        const content = await readFile(path.isAbsolute(file) ? file : path.join(options.webDirectory, file));
+        response.writeHead(200, { "Content-Type": type });
+        response.end(content);
+        return;
+      }
+      const exportMatch = /^\/api\/corpora\/([^/]+)\/export$/.exec(url.pathname);
+      const corpusMatch = /^\/api\/corpora\/([^/]+)$/.exec(url.pathname);
+      const isUpload = request.method === "POST" && url.pathname === "/api/corpora";
+      const isImport = request.method === "POST" && url.pathname === "/api/corpora/import";
+      const isQuestion = request.method === "POST" && url.pathname === "/api/questions";
+      const isSettings = url.pathname === "/api/settings/openai" && ["GET", "PUT", "DELETE"].includes(request.method ?? "");
+      if (!isSettings && !isUpload && !isImport && !isQuestion &&
+          !(request.method === "GET" && (exportMatch || corpusMatch))) {
         throw new WebError(404, "Resource not found.");
-      });
+      }
+      // Fail fast before session allocation, body buffering, parsing or disk reads.
+      if (isUpload) resources.preparations.assertAvailable();
+      if (isUpload || isImport) options.store.assertCorpusCapacity();
+      const release = isQuestion ? resources.questions.acquire()
+        : isUpload || isImport ? resources.ingestion.acquire() : () => {};
+      try {
+        const { keys, setCookie, requireActive, claimCorpus, requireCorpus } = sessions.resolve(
+          request.headers.cookie, secure, isSettings || isUpload || isImport);
+        if (setCookie) response.setHeader("Set-Cookie", setCookie);
+        await keys.context(async () => {
+          if (url.pathname === "/api/settings/openai") {
+            if (request.method === "GET") { send(200, keys.status()); return; }
+            if (request.method === "PUT") {
+              const body = await readJson(request, 2048);
+              try { keys.set(body.key); }
+              finally { delete body.key; }
+              send(200, keys.status()); return;
+            }
+            if (request.method === "DELETE") { keys.remove(); send(200, keys.status()); return; }
+          }
+          if (request.method === "POST" && url.pathname === "/api/corpora") {
+            // Six bytes per UTF-8 byte covers JSON escaping; reserve a small envelope.
+            const body = await readJson(request, limits.maxTextBytes * 6 + TXT_ENVELOPE_BYTES);
+            resources.checkText(body.text);
+            requireActive();
+            keys.require();
+            keys.checkContent(body);
+            // CorpusStore owns runtime validation; browser input is never trusted.
+            const info = keys.run(() => options.store.create(body as unknown as Parameters<CorpusStore["create"]>[0]));
+            claimCorpus(info.id);
+            send(202, info);
+            return;
+          }
+          if (request.method === "POST" && url.pathname === "/api/corpora/import") {
+            const body = await readJson(request, limits.maxImportBytes);
+            resources.checkChunks(body.corpus);
+            requireActive();
+            keys.checkContent(body);
+            const info = await options.store.import(body.corpus, body.name, body.language);
+            // Import may outlive the initiating session; never revive its ownership.
+            claimCorpus(info.id);
+            send(201, info);
+            return;
+          }
+          if (request.method === "GET" && exportMatch) {
+            requireCorpus(exportMatch[1]);
+            const payload = await options.store.export(exportMatch[1]);
+            requireCorpus(exportMatch[1]);
+            keys.checkContent(payload);
+            response.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
+              "Content-Disposition": `attachment; filename="${exportFilename(payload.sourceFilename)}"` });
+            response.end(JSON.stringify(payload, null, 2));
+            return;
+          }
+          if (request.method === "GET" && corpusMatch) {
+            requireCorpus(corpusMatch[1]);
+            const info = await options.store.getInfo(corpusMatch[1]);
+            requireCorpus(corpusMatch[1]);
+            keys.checkContent(info);
+            send(200, info);
+            return;
+          }
+          if (request.method === "POST" && url.pathname === "/api/questions") {
+            const body = await readJson(request, QUESTION_REQUEST_BYTES);
+            keys.checkContent(body);
+            if (typeof body.corpusId !== "string" || typeof body.question !== "string" ||
+                !body.question.trim() || body.question.length > 4000) {
+              throw new WebError(400, "Provide a corpus and a question between 1 and 4,000 characters.");
+            }
+            requireCorpus(body.corpusId);
+            const { info, corpus } = await options.store.getReady(body.corpusId);
+            requireCorpus(body.corpusId);
+            keys.checkContent({ info, corpus });
+            if (busyCorpora.has(info.id)) throw new WebError(429, "A question is already being processed for this document.");
+            busyCorpora.add(info.id);
+            try {
+              const question = body.question.trim();
+              const result = keys.status().ready
+                ? await keys.run(() => options.ask(question, corpus))
+                : await options.ask(question, corpus, true);
+              requireCorpus(body.corpusId);
+              keys.checkContent(result);
+              send(200, { corpus: info, ...result });
+            } finally { busyCorpora.delete(info.id); }
+            return;
+          }
+          throw new WebError(404, "Resource not found.");
+        });
+      } finally { release(); }
     })().catch(error => {
       if (!(error instanceof WebError)) reportError(new Error("Web operation failed."));
       if (!response.headersSent && !response.destroyed) {
+        // Unread/rejected bodies are not drained into memory or kept alive.
+        if (!request.complete || (error instanceof WebError && error.status === 413)) {
+          response.shouldKeepAlive = false;
+          response.setHeader("Connection", "close");
+        }
         send(error instanceof WebError ? error.status : 500, {
           error: error instanceof WebError ? error.message : "Operational error. Check the server terminal; no answer has been verified."
         });
@@ -174,6 +204,7 @@ export function createWebServer(options: ServerOptions): http.Server {
 
 async function main(): Promise<void> {
   const { port, host, publicOrigin } = readWebRuntimeConfig();
+  const resources = new WebResources(readWebLimits());
   // The shared facade loads an SDK only with explicit observability opt-in.
   const { langfuseSdk } = await import("../observability/langfuse.js");
   let primaryFailure = false;
@@ -187,8 +218,8 @@ async function main(): Promise<void> {
     const root = path.resolve(__dirname, "../..");
     store = new CorpusStore(path.join(root, "data/web/corpora"), {
       prepare: prepareCorpusLocal, enrich: enrichPreparedCorpusWithOpenAI
-    }, console.error, KeyManager.checkContent);
-    server = createWebServer({ store, sessions, publicOrigin, ask: createWorkflowService(), webDirectory: path.join(root, "apps/web") });
+    }, console.error, KeyManager.checkContent, resources);
+    server = createWebServer({ store, sessions, publicOrigin, ask: createWorkflowService(undefined, resources), webDirectory: path.join(root, "apps/web") });
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(port, host, () => {

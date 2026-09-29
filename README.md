@@ -254,8 +254,74 @@ For local development leave `WEB_PUBLIC_ORIGIN` unset and do not set
 Session keys and corpus ownership remain memory-only and are lost on process
 restart. No shared `OPENAI_API_KEY` is needed for the web app. Existing model and
 Langfuse credentials alone do not enable tracing; see the explicit opt-in above.
-Runtime/origin support and privacy-safe observability are implemented; quotas, cleanup and operational milestones
-remain prerequisites for the first public release.
+Runtime/origin support, privacy-safe observability, and bounded process-local resource
+admission are implemented. Retention/cleanup and other operational milestones remain separate work.
+
+## Bounded resources (public-release milestone 3)
+
+Limits are centralized in `src/web/resourceLimits.ts` and read once at startup.
+All overrides must be positive decimal safe integers; invalid configuration fails
+startup. Restart to change limits. The production server shares one
+`WebResources` instance across its store, HTTP handlers, and workflow service.
+These limits are **process-local**, for the intended single-instance deployment.
+They do not coordinate multiple processes or replicas.
+
+| Environment variable | Default | What is bounded |
+| --- | ---: | --- |
+| `WEB_MAX_TEXT_BYTES` | 1,048,576 (1 MiB) | Decoded TXT content, measured in UTF-8 bytes |
+| `WEB_MAX_IMPORT_BYTES` | 8,388,608 (8 MiB) | Entire imported JSON HTTP body, including the request envelope; direct store imports also check corpus JSON bytes |
+| `WEB_MAX_CHUNKS` | 256 | Chunks per created, imported, or reloaded corpus |
+| `WEB_MAX_CORPORA` | 32 | Retained corpus records plus in-flight import/reload reservations in this process |
+| `WEB_MAX_PREPARATIONS` | 1 | Simultaneous TXT preparation jobs; also the size of a separate shared upload/import request-admission gate |
+| `WEB_MAX_QUESTIONS` | 2 | Simultaneous question requests, including retrieval-only mode |
+| `WEB_MAX_RETRIEVALS` | 2 | Simultaneous retrieval calls across keyed workflows, retrieval-only requests, and diagnostic recovery |
+
+Static assets and unmatched routes do not create browser sessions. Corpus reads,
+exports and questions require an existing session; they do not allocate a new
+one for an unknown or expired cookie. Settings and import/upload routes retain
+their session behavior. There are no health/readiness endpoints in this runtime.
+The existing session cap remains 256, with its existing 30-minute idle expiry;
+full session capacity now returns 429, without evicting another browser's keys.
+
+Admission is fail-fast, before buffering upload/import/question bodies. The
+upload/import gate bounds slow body readers and imports through persistence;
+TXT preparation has its own job slot lasting through enrichment and persistence.
+Known Content-Length overflow is rejected before reading, and streaming bodies
+are counted independently. The TXT request envelope is bounded to
+`6 * WEB_MAX_TEXT_BYTES + 4096` bytes to allow JSON escaping; the decoded text
+limit still applies. Question JSON is capped at 32 KiB, alongside the existing
+4,000-character question limit; key-setting JSON remains capped at 2 KiB.
+The existing browser file-size guards are unchanged: lower server limits are
+reported by the API, while increasing a server limit does not raise a browser guard.
+
+TXT is split locally once to check the exact chunk count before returning 202
+and before any enrichment/OpenAI work. Import chunk counts are checked before
+credential scanning and structural/vector validation. The prepared-corpus
+schema, embeddings, and import/export representation are unchanged; limits are
+an additional admission policy. Above-limit bytes/chunks return **413**. Full
+admission capacity returns **429**, with no waiting queue. **503** remains for
+an unavailable service (the existing closed session manager), not ordinary load.
+
+All transient permits and import/reload reservations are released in `finally`,
+on validation errors, success, and failures. Preparation transfers its permit
+to the background job and releases it when that job settles. Retrieval releases
+its permit after each actual retrieval call, before Generate/Verify continues.
+The existing per-corpus question lock is likewise released in `finally`.
+
+Corpus records in preparing, ready, and failed states count toward the retained
+record cap, preserving status polling and preventing unbounded failed-job
+metadata. Successful imports/reloads exchange their transient reservation for
+one retained record; unsuccessful imports/reloads release the reservation.
+The record cap stays full until process restart; sessions expiring do not evict
+records. Existing owned corpora remain readable/queryable at capacity. This is
+not a disk quota, retention policy, or corpus cleanup mechanism. Restart clears
+the in-memory registry and sessions, but does not delete saved files or restore
+browser ownership.
+
+Deterministic web tests cover resource configuration, session-free routes,
+UTF-8 and streamed-body limits, chunk/record limits, concurrent reservations,
+preparation/question/retrieval saturation, recovery retrieval, and permit
+release on validation, storage, OpenAI-stage and retrieval failures.
 
 ## Local web application
 
@@ -297,7 +363,7 @@ npm run web:local
 
 `src/web/server.ts` exposes `POST /api/corpora`, `GET /api/corpora/:id`, and `POST /api/questions`. It also exposes `POST /api/corpora/import`, `GET /api/corpora/:id/export`, and `GET/PUT/DELETE /api/settings/openai`. It serves allowlisted frontend assets, rejects foreign origins/hosts, and returns generic operational errors rather than upstream response bodies. It binds only to `127.0.0.1`; it is not an authenticated multi-user or public deployment. The UI treats filenames, questions, responses and evidence as untrusted text and does not use `innerHTML`.
 
-Preparation is sequential within a document; one preparation is allowed at a time, and overlapping questions for the same corpus receive a conflict response. Completed corpora are atomically published after enrichment. Failed jobs remain visible in memory and require explicit retry; there is no resume/checkpoint mechanism. A forced server stop loses unfinished preparation, and retry repeats completed metadata calls. Ctrl+C / SIGTERM stops accepting requests, waits for active requests and preparation, and shuts down Langfuse. A primary execution error is preserved if Langfuse shutdown also fails.
+Preparation is sequential within a document; by default one preparation and two questions are allowed at a time. Full admission capacity and overlapping questions for the same corpus receive HTTP 429. Completed corpora are atomically published after enrichment. Failed jobs remain visible in memory and require explicit retry; there is no resume/checkpoint mechanism. A forced server stop loses unfinished preparation, and retry repeats completed metadata calls. Ctrl+C / SIGTERM stops accepting requests, waits for active requests and preparation, and shuts down Langfuse. A primary execution error is preserved if Langfuse shutdown also fails.
 
 The saved files are trusted local data; imported corpora also receive strict structural validation on reload. There is no corpus library/delete UI, conversation memory, token streaming or per-node live progress in this version. Question results are displayed in the browser, not saved as separate web result files or exported in telemetry. The generator/verifier prompts and retrieval logic are unchanged; only credential access and transport error sanitization are shared. The models still determine semantic grounding quality; model verification is not a proof. File contents are never silently refreshed from a changed source file.
 
@@ -305,7 +371,7 @@ The saved files are trusted local data; imported corpora also receive strict str
 
 Settings holds the key only in memory for this shared local workspace. The password field clears after submission or closing the dialog. A successful **Use key** submission closes the dialog and shows **OpenAI ready**. Keys are never returned by the API or stored in browser storage, corpus files, logs, or traces. **Remove key** clears the in-memory user key and immediately shows **OpenAI key missing**, disabling TXT preparation and questions. There is no environment fallback in the web app, even if the server process has `OPENAI_API_KEY` configured. Import and export remain available without a key. Readiness indicates configuration, not a live credential check. TXT preparation and questions require a key. Stopping the server clears the session key and prevents further requests with it; requests already sent may still finish. Imported documents, questions, and model responses are checked for known credentials and OpenAI-key-shaped strings before persistence or tracing.
 
-**Import prepared corpus** accepts ParancU JSON up to 32 MiB without a key and without calling OpenAI or E5. Legacy files contain exactly `docId`, `sentences`, and `chunks`. Each chunk must include summary, guiding question, answer focus, and both 384-dimensional finite nonzero E5 vectors. Validation rejects unknown fields, invalid sentence IDs/offsets, broken references, inconsistent chunk text, missing metadata, and incompatible versioned exports. For legacy files without document metadata, the selected language, imported filename, and import date describe the local copy. Vector provenance cannot be proven from a legacy array; use corpora generated by the existing multilingual E5-small pipeline.
+**Import prepared corpus** accepts ParancU JSON within the configured HTTP request limit (8 MiB by default, including the JSON request envelope) without a key and without calling OpenAI or E5. Legacy files contain exactly `docId`, `sentences`, and `chunks`. Each chunk must include summary, guiding question, answer focus, and both 384-dimensional finite nonzero E5 vectors. Validation rejects unknown fields, invalid sentence IDs/offsets, broken references, inconsistent chunk text, missing metadata, and incompatible versioned exports. For legacy files without document metadata, the selected language, imported filename, and import date describe the local copy. Vector provenance cannot be proven from a legacy array; use corpora generated by the existing multilingual E5-small pipeline.
 
 **Export corpus** downloads a version 1 wrapper containing `formatVersion`, `sourceFilename`, `language`, `createdAt`, `embedding: { model: "multilingual-e5-small", dimensions: 384 }`, and the exact `corpus` passed to the workflow. Reimport preserves these fields, document ID, sentence units, metadata and vectors. Export filenames are sanitized. Imported corpora use a separate server-generated storage ID, are marked as imported, and can be queried immediately once a key is configured. Import/export never regenerates metadata or embeddings. The stored hash identifies TXT content for created corpora and corpus JSON for imports.
 

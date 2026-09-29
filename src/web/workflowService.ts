@@ -4,6 +4,7 @@ import type { WorkflowDependencies } from "../workflow/graph";
 import { runWorkflow, type WorkflowResult } from "../workflow/runWorkflow";
 import { generateResponse } from "../responder/responseAgent";
 import { verifyEvidence } from "../verifier/evidenceVerifier";
+import { WebResources } from "./resourceLimits";
 
 export type RetrievedEvidence = {
   chunkIndex: number;
@@ -23,10 +24,13 @@ const defaults: WorkflowDependencies = {
   verifyAnswer: verifyEvidence
 };
 
-export function createWorkflowService(dependencies: WorkflowDependencies = defaults) {
+export function createWorkflowService(dependencies: WorkflowDependencies = defaults, resources = new WebResources()) {
+  const retrieve: WorkflowDependencies["retrieveCandidates"] = (...args) =>
+    resources.retrievals.run(() => dependencies.retrieveCandidates(...args));
   return async (question: string, corpus: PrepareResult, retrievalOnly = false): Promise<WebWorkflowResult> => {
+    resources.checkChunks(corpus);
     if (retrievalOnly) {
-      const candidates = await dependencies.retrieveCandidates(question, corpus, 5);
+      const candidates = await retrieve(question, corpus, 5);
       return {
         result: { action: "retrieval_only", question },
         retrievedEvidence: candidates.map((candidate, index) => ({
@@ -44,7 +48,7 @@ export function createWorkflowService(dependencies: WorkflowDependencies = defau
     const result = await runWorkflow(question, corpus, {
       checkComplement: dependencies.checkComplement,
       retrieveCandidates: async (...args) => {
-        const ranked = await dependencies.retrieveCandidates(...args);
+        const ranked = await retrieve(...args);
         if (retrievals++ === 0) candidates = ranked;
         else recoveryCandidates.push(...ranked.map((c, index) => ({
           chunkIndex: c.chunk_index, text: c.chunk, summary: c.summary, candidateRank: index + 1,

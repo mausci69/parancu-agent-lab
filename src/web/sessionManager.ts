@@ -73,7 +73,7 @@ export class SessionManager {
     }
   }
 
-  resolve(cookie: string | undefined, secure = false): SessionAccess & { setCookie?: string } {
+  resolve(cookie: string | undefined, secure = false, create = true): SessionAccess & { setCookie?: string } {
     if (this.closed) throw new WebError(503, "The server is shutting down.");
     let id: string | undefined;
     for (const part of cookie?.split(";") ?? []) {
@@ -95,8 +95,9 @@ export class SessionManager {
       existing.lastSeen = this.now();
       return access(existing);
     }
+    if (!create) throw new WebError(404, "Corpus not found.");
     // Do not evict another browser's active credentials to admit a new session.
-    if (this.sessions.size >= this.capacity) throw new WebError(503, "Session capacity reached. Try again later.");
+    if (this.sessions.size >= this.capacity) throw new WebError(429, "Session capacity reached. Try again later.");
     do { id = randomBytes(32).toString("base64url"); } while (this.sessions.has(id));
     const session = new Session(this.idleMs, this.now);
     this.sessions.set(id, session);
