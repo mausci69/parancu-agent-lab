@@ -47,7 +47,8 @@ async function readJson(request: http.IncomingMessage, limit: number): Promise<R
   } catch { throw new WebError(400, "Invalid JSON."); }
 }
 
-export function createWebServer(options: ServerOptions): http.Server & { closeSessions(): void } {
+export function createWebServer(options: ServerOptions): http.Server & { closeSessions(): void; beginDraining(): void } {
+  let draining = false;
   const resources = options.store.resources;
   const limits = resources.limits;
   const publicOrigin = parsePublicOrigin(options.publicOrigin);
@@ -88,6 +89,7 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
         response.end(content);
         return;
       }
+      if (draining) throw new WebError(503, "Service temporarily unavailable.");
       const exportMatch = /^\/api\/corpora\/([^/]+)\/export$/.exec(url.pathname);
       const corpusMatch = /^\/api\/corpora\/([^/]+)$/.exec(url.pathname);
       const isUpload = request.method === "POST" && url.pathname === "/api/corpora";
@@ -206,7 +208,10 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
     });
   });
   server.once("close", () => sessions.close());
-  return Object.assign(server, { closeSessions: () => sessions.close() });
+  return Object.assign(server, {
+    closeSessions: () => sessions.close(),
+    beginDraining: () => { draining = true; }
+  });
 }
 
 export async function purgeWebCorpora(corpusDirectory: string): Promise<void> {
@@ -243,7 +248,7 @@ async function main(): Promise<void> {
     console.log(`ParancU Agent Lab: ${publicOrigin ?? `http://127.0.0.1:${port}`}`);
     console.log("Document preparation and questions use OpenAI. Press Ctrl+C to shut down after current operations finish.");
     await new Promise<void>((resolve, reject) => {
-      const stop = () => { server!.closeSessions(); cleanup(); resolve(); };
+      const stop = () => { server!.beginDraining(); server!.closeSessions(); cleanup(); resolve(); };
       const fail = (error: Error) => { cleanup(); reject(error); };
       const cleanup = () => {
         process.removeListener("SIGINT", stop);
@@ -258,6 +263,7 @@ async function main(): Promise<void> {
     primaryFailure = true;
     throw error;
   } finally {
+    server?.beginDraining();
     server?.closeSessions();
     try {
       if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));

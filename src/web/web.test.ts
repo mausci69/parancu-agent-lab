@@ -237,6 +237,60 @@ test("HTTP no_evidence is a successful search outcome with rejected candidates",
   assert.equal(body.retrievedEvidence.length, 3);
 });
 
+test("draining rejects new API work before admission while an in-flight question finishes", async t => {
+  const gate = deferred();
+  const started = deferred();
+  const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const info = store.create(input);
+  await store.drain();
+  const sessions = new SessionManager();
+  const browser = sessions.resolve(undefined);
+  browser.claimCorpus(info.id);
+  browser.keys.set(sessionKey);
+  let calls = 0;
+  const server = createWebServer({ store, sessions, webDirectory, reportError: noLog,
+    ask: async (q, c) => { calls++; started.resolve(); await gate.promise; return service()(q, c); }
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    gate.resolve();
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await store.drain();
+  });
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const headers = { Cookie: browser.setCookie!.split(";")[0], "Content-Type": "application/json" };
+  const normal = await globalThis.fetch(base + "/api/settings/openai", { headers });
+  assert.equal(normal.status, 200);
+  assert.equal((await normal.json()).ready, true);
+  const first = globalThis.fetch(base + "/api/questions", { method: "POST", headers,
+    body: JSON.stringify({ corpusId: info.id, question: "question" }) });
+  await started.promise;
+  const resolveSession = t.mock.method(sessions, "resolve");
+  const ingestion = t.mock.method(store.resources.ingestion, "acquire");
+  const questions = t.mock.method(store.resources.questions, "acquire");
+  const create = t.mock.method(store, "create");
+  const imported = t.mock.method(store, "import");
+  server.beginDraining();
+  server.beginDraining();
+  for (const [route, method] of [["/api/settings/openai", "GET"], ["/api/settings/openai", "PUT"],
+    ["/api/settings/openai", "DELETE"], ["/api/corpora", "POST"], ["/api/corpora/import", "POST"],
+    ["/api/questions", "POST"], [`/api/corpora/${info.id}`, "GET"], [`/api/corpora/${info.id}/export`, "GET"]]) {
+    // No cookie: rejection must happen before allocating a browser session.
+    const response = await globalThis.fetch(base + route, { method });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: "Service temporarily unavailable." });
+    assert.equal(response.headers.get("set-cookie"), null);
+  }
+  for (const mock of [resolveSession, ingestion, questions, create, imported]) {
+    assert.equal(mock.mock.callCount(), 0);
+  }
+  assert.equal(calls, 1);
+  gate.resolve();
+  const completed = await first;
+  assert.equal(completed.status, 200);
+  assert.equal((await completed.json()).result.action, "answer");
+});
+
 test("HTTP rejects duplicate questions while one is running", async t => {
   const gate = deferred();
   const started = deferred();
