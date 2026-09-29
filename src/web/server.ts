@@ -47,7 +47,7 @@ async function readJson(request: http.IncomingMessage, limit: number): Promise<R
   } catch { throw new WebError(400, "Invalid JSON."); }
 }
 
-export function createWebServer(options: ServerOptions): http.Server {
+export function createWebServer(options: ServerOptions): http.Server & { closeSessions(): void } {
   const resources = options.store.resources;
   const limits = resources.limits;
   const publicOrigin = parsePublicOrigin(options.publicOrigin);
@@ -55,6 +55,9 @@ export function createWebServer(options: ServerOptions): http.Server {
   const reportError = options.reportError ?? console.error;
   const busyCorpora = new Set<string>();
   const sessions = options.sessions ?? new SessionManager();
+  sessions.addCorpusReleaseHandler(ids => {
+    for (const id of ids) void options.store.remove(id);
+  });
   const server = http.createServer((request, response) => {
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Cache-Control", "no-store");
@@ -199,7 +202,7 @@ export function createWebServer(options: ServerOptions): http.Server {
     });
   });
   server.once("close", () => sessions.close());
-  return server;
+  return Object.assign(server, { closeSessions: () => sessions.close() });
 }
 
 async function main(): Promise<void> {
@@ -209,8 +212,7 @@ async function main(): Promise<void> {
   const { langfuseSdk } = await import("../observability/langfuse.js");
   let primaryFailure = false;
   let store: CorpusStore | undefined;
-  let server: http.Server | undefined;
-  const sessions = new SessionManager();
+  let server: ReturnType<typeof createWebServer> | undefined;
   try {
     const { prepareCorpusLocal } = await import("../../services/parancu-api/src/local/prepareCorpus.js");
     const { enrichPreparedCorpusWithOpenAI } = await import("../../services/parancu-api/src/lib/gen/openaiPrepare.js");
@@ -219,7 +221,7 @@ async function main(): Promise<void> {
     store = new CorpusStore(path.join(root, "data/web/corpora"), {
       prepare: prepareCorpusLocal, enrich: enrichPreparedCorpusWithOpenAI
     }, console.error, KeyManager.checkContent, resources);
-    server = createWebServer({ store, sessions, publicOrigin, ask: createWorkflowService(undefined, resources), webDirectory: path.join(root, "apps/web") });
+    server = createWebServer({ store, publicOrigin, ask: createWorkflowService(undefined, resources), webDirectory: path.join(root, "apps/web") });
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(port, host, () => {
@@ -230,7 +232,7 @@ async function main(): Promise<void> {
     console.log(`ParancU Agent Lab: ${publicOrigin ?? `http://127.0.0.1:${port}`}`);
     console.log("Document preparation and questions use OpenAI. Press Ctrl+C to shut down after current operations finish.");
     await new Promise<void>((resolve, reject) => {
-      const stop = () => { sessions.close(); cleanup(); resolve(); };
+      const stop = () => { server!.closeSessions(); cleanup(); resolve(); };
       const fail = (error: Error) => { cleanup(); reject(error); };
       const cleanup = () => {
         process.removeListener("SIGINT", stop);
@@ -245,7 +247,7 @@ async function main(): Promise<void> {
     primaryFailure = true;
     throw error;
   } finally {
-    sessions.close();
+    server?.closeSessions();
     try {
       if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
       await store?.drain();

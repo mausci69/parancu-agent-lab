@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { KeyManager } from "./keyManager";
-import { WebError } from "./corpusStore";
+import { WebError } from "./webError";
 
 export const SESSION_COOKIE = "parancu_session";
 class Session {
@@ -9,7 +9,8 @@ class Session {
   #closed = false;
   lastSeen: number;
 
-  constructor(private readonly idleMs: number, private readonly now: () => number) {
+  constructor(private readonly idleMs: number, private readonly now: () => number,
+    private readonly releaseCorpora: (ids: string[]) => void) {
     this.lastSeen = now();
   }
 
@@ -29,9 +30,12 @@ class Session {
   }
 
   close() {
+    if (this.#closed) return;
+    const ids = [...this.#corpora];
     this.#closed = true;
     this.#corpora.clear();
     this.keys.close();
+    if (ids.length) this.releaseCorpora(ids);
   }
 }
 
@@ -54,13 +58,22 @@ export class SessionManager {
   constructor(
     private readonly capacity = 256,
     private readonly idleMs = 30 * 60 * 1000,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    private releaseCorpora: (ids: string[]) => void = () => {}
   ) {
     if (!Number.isInteger(capacity) || capacity < 1 || !Number.isSafeInteger(idleMs) || idleMs < 1) {
       throw new Error("Invalid session limits.");
     }
     this.timer = setInterval(() => this.expire(), Math.min(idleMs, 60_000));
     this.timer.unref();
+  }
+
+  addCorpusReleaseHandler(handler: (ids: string[]) => void) {
+    const previous = this.releaseCorpora;
+    this.releaseCorpora = ids => {
+      try { previous(ids); }
+      finally { handler(ids); }
+    };
   }
 
   private expire() {
@@ -99,7 +112,7 @@ export class SessionManager {
     // Do not evict another browser's active credentials to admit a new session.
     if (this.sessions.size >= this.capacity) throw new WebError(429, "Session capacity reached. Try again later.");
     do { id = randomBytes(32).toString("base64url"); } while (this.sessions.has(id));
-    const session = new Session(this.idleMs, this.now);
+    const session = new Session(this.idleMs, this.now, ids => this.releaseCorpora(ids));
     this.sessions.set(id, session);
     return {
       ...access(session),

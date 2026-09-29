@@ -211,5 +211,17 @@ export class CorpusStore {
     return { info: { ...entry.info }, corpus: entry.corpus };
   }
 
+  async remove(id: string): Promise<void> {
+    if (!validId.test(id)) return;
+    this.entries.delete(id);
+    try { await unlink(path.join(this.directory, `${id}.json`)); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        try { this.reportError(new Error("Corpus removal failed.")); }
+        catch { /* Reporting must not expose filesystem errors or reject cleanup. */ }
+      }
+    }
+  }
+
   async drain(): Promise<void> { await Promise.all(this.pending); }
 }

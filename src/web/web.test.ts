@@ -435,6 +435,62 @@ test("sessions validate cookies, bound capacity, expire credentials and close re
   assert.throws(() => unknown.claimCorpus("owned"), WebError);
 });
 
+test("server wires cleanup to a supplied SessionManager with existing sessions", async t => {
+  const directory = await tempDirectory(t);
+  const store = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const info = await store.import(enriched(), "owned.json", "en");
+  let now = 0;
+  const deletions: Promise<void>[] = [];
+  const released: string[] = [];
+  const sessions = new SessionManager(2, 100, () => now, ids => { released.push(...ids); });
+  t.after(() => sessions.close());
+  const owner = sessions.resolve(undefined);
+  owner.claimCorpus(info.id);
+  const remove = store.remove.bind(store);
+  t.mock.method(store, "remove", (id: string) => {
+    assert.throws(() => owner.requireCorpus(info.id), WebError, "ownership is revoked before deletion starts");
+    const deletion = remove(id);
+    deletions.push(deletion);
+    return deletion;
+  });
+  createWebServer({ store, sessions, ask: service(), webDirectory, reportError: noLog });
+  assert.deepEqual(await readdir(directory), [`${info.id}.json`]);
+  now = 100;
+  sessions.resolve(undefined);
+  await Promise.all(deletions);
+  assert.deepEqual(released, [info.id], "existing release callback is preserved");
+  assert.equal(deletions.length, 1);
+  assert.deepEqual(await readdir(directory), []);
+  await assert.rejects(store.getReady(info.id), (error: unknown) => error instanceof WebError && error.status === 404);
+});
+
+test("expiring one session does not delete another session's corpus", async t => {
+  const directory = await tempDirectory(t);
+  const store = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const firstInfo = await store.import(enriched(), "first.json", "en");
+  const secondInfo = await store.import(enriched(), "second.json", "en");
+  let now = 0;
+  const deletions: Promise<void>[] = [];
+  const sessions = new SessionManager(2, 100, () => now, ids => {
+    for (const id of ids) deletions.push(store.remove(id));
+  });
+  t.after(async () => { sessions.close(); await Promise.all(deletions); });
+  const first = sessions.resolve(undefined);
+  first.claimCorpus(firstInfo.id);
+  now = 50;
+  const second = sessions.resolve(undefined);
+  second.claimCorpus(secondInfo.id);
+  now = 100;
+  sessions.resolve(second.setCookie!.split(";")[0]);
+  await Promise.all(deletions);
+  assert.throws(() => first.requireCorpus(firstInfo.id), WebError);
+  assert.doesNotThrow(() => second.requireCorpus(secondInfo.id));
+  assert.equal(deletions.length, 1);
+  assert.deepEqual(await readdir(directory), [`${secondInfo.id}.json`]);
+  assert.deepEqual((await store.getReady(secondInfo.id)).corpus, enriched());
+  await assert.rejects(store.getReady(firstInfo.id), (error: unknown) => error instanceof WebError && error.status === 404);
+});
+
 test("browser sessions isolate settings, question credentials and background TXT preparation", async t => {
   environmentPresent(t);
   const preparationStarted = deferred();
