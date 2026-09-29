@@ -10,6 +10,7 @@
     "workflow:real": "tsx src/testRealCorpus.ts",
     "web:local": "tsx src/web/server.ts",
     "start": "tsx src/web/server.ts",
+    "e5:verify": "tsx services/parancu-api/src/verifyE5Bundle.ts",
     "typecheck": "tsc --noEmit",
     "eval:multi-evidence": "tsx evaluation/runMultiEvidenceEval.ts"
   },

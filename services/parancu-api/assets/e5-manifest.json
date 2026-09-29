@@ -1,0 +1,12 @@
+{
+  "model": "intfloat/multilingual-e5-small",
+  "dimensions": 384,
+  "files": {
+    "model_int8.onnx": "238ced35bb66cf92790e184d05c71db4523c65af9d6ea80661736952a6067fb6",
+    "sentencepiece.bpe.model": "cfc8146abe2a0488e9e2a0c56de7952f7c11ab059eca145a0a727afce0db2865",
+    "special_tokens_map.json": "d05497f1da52c5e09554c0cd874037a083e1dc1b9cfd48034d1c717f1afc07a7",
+    "tokenizer_config.json": "a1d6bc8734a6f635dc158508bef000f8e2e5a759c7d92f984b2c86e5ff53425b",
+    "tokenizer.json": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
+    "tokenizer.onnx": "285813c5c60a7ac087e7375c33836bcdb41497d28a38f4c2f8eed3e59a3a9660"
+  }
+}

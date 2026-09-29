@@ -204,20 +204,25 @@ changing dependency resolution or introducing a build system. The nested install
 provides `@huggingface/tokenizers` and native `onnxruntime-node`; do not copy a
 developer machine's `node_modules` into a deployment on a different platform.
 
-Supply the existing compatible multilingual E5-small assets at these exact paths:
+Provision the existing validated ParancU E5 bundle (`intfloat/multilingual-e5-small`),
+identical to the mobile app bundle, at these paths:
 
 ```text
 services/parancu-api/assets/models/e5/model_int8.onnx
+services/parancu-api/assets/models/e5/sentencepiece.bpe.model
+services/parancu-api/assets/models/e5/special_tokens_map.json
 services/parancu-api/assets/models/e5/tokenizer.json
 services/parancu-api/assets/models/e5/tokenizer_config.json
+services/parancu-api/assets/models/e5/tokenizer.onnx
 ```
 
 Paths are resolved relative to `services/parancu-api/src/lib/embeddings.ts`, not the
 shell working directory. The model must produce 384-dimensional
 `sentence_embedding` output using the matching tokenizer. These locally supplied
-assets are not downloaded at startup or provided by npm. Preserve a versioned
-asset bundle and its checksums in your deployment provisioning; this repository
-does not establish their download source, revision, or checksums. Include
+assets, including model binaries, remain intentionally outside Git and are not
+downloaded at startup or provided by npm. Before startup, run `npm run e5:verify`
+to check all six files against the tracked SHA-256 manifest at
+`services/parancu-api/assets/e5-manifest.json`. Include
 `apps/web/` and `apps/mobile/assets/icon.png`. The process still needs write access
 to `data/web/corpora`; storage lifecycle is unchanged by this milestone.
 
