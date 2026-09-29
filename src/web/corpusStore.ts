@@ -100,6 +100,7 @@ export class CorpusStore {
   private async prepare(entry: Entry, prepared: PrepareResult): Promise<void> {
     try {
       const corpus = await this.dependencies.enrich(prepared, { corpusLanguage: entry.info.language });
+      if (this.entries.get(entry.info.id) !== entry) return;
       this.resources.checkChunks(corpus);
       const info: CorpusInfo = {
         ...entry.info, status: "ready", sentences: corpus.sentences.length, chunks: corpus.chunks.length
@@ -110,6 +111,9 @@ export class CorpusStore {
     } catch (error) {
       entry.info = { ...entry.info, status: "failed", error: "Preparation failed. Check the server terminal, then start preparation again." };
       try { this.reportError(new Error("Corpus preparation failed.")); } catch { /* Reporting cannot strand a job. */ }
+    } finally {
+      // Removal may also have happened while persistence was awaiting I/O.
+      if (this.entries.get(entry.info.id) !== entry) await this.remove(entry.info.id);
     }
   }
 

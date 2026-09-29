@@ -138,7 +138,11 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
             keys.checkContent(body);
             const info = await options.store.import(body.corpus, body.name, body.language);
             // Import may outlive the initiating session; never revive its ownership.
-            claimCorpus(info.id);
+            try { claimCorpus(info.id); }
+            catch (error) {
+              await options.store.remove(info.id);
+              throw error;
+            }
             send(201, info);
             return;
           }

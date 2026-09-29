@@ -624,7 +624,8 @@ test("expiry during import cannot claim persisted data or restore ownership", as
   assert.throws(() => originalSession.claimCorpus(id), WebError);
   assert.throws(() => originalSession.requireCorpus(id), WebError);
   assert.equal((await fetch(`${base}/api/corpora/${id}`)).status, 404);
-  assert.deepEqual(await readdir(directory), [`${id}.json`]);
+  assert.deepEqual(await readdir(directory), []);
+  await assert.rejects(store.getReady(id), (error: unknown) => error instanceof WebError && error.status === 404);
   const restarted = await startServer(t, new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog));
   assert.equal((await fetch(`${restarted}/api/corpora/${id}/export`)).status, 404, "restart must not infer ownership from disk");
 });
@@ -653,11 +654,11 @@ test("TXT preparation finishing after expiry cannot restore corpus access", asyn
     assert.throws(() => owner.requireCorpus(info.id), WebError);
   } finally { release.resolve(); }
   await store.drain();
-  assert.equal((await store.getInfo(info.id)).status, "ready");
+  await assert.rejects(store.getInfo(info.id), (error: unknown) => error instanceof WebError && error.status === 404);
   assert.throws(() => owner.claimCorpus(info.id), WebError);
   assert.equal((await fetch(`${base}/api/corpora/${info.id}`)).status, 404);
   assert.equal((await post(base, "/api/questions", { corpusId: info.id, question: "What color?" })).status, 404);
-  assert.deepEqual(await readdir(directory), [`${info.id}.json`]);
+  assert.deepEqual(await readdir(directory), []);
 });
 
 for (const operation of ["status", "export", "question"] as const) {
