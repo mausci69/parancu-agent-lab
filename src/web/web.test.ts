@@ -237,6 +237,49 @@ test("HTTP no_evidence is a successful search outcome with rejected candidates",
   assert.equal(body.retrievedEvidence.length, 3);
 });
 
+test("health and readiness are session-free, reflect draining, and preserve Host/origin protection", async t => {
+  for (const publicOrigin of [undefined, "https://lab.example"]) {
+    const sessions = new SessionManager();
+    const resolveSession = t.mock.method(sessions, "resolve", () => assert.fail("probe allocated a session"));
+    const store = new CorpusStore(await tempDirectory(t), {
+      prepare: () => assert.fail("probe prepared corpus data"),
+      enrich: async () => assert.fail("probe enriched corpus data")
+    }, noLog);
+    const server = createWebServer({ store, sessions, publicOrigin, webDirectory,
+      ask: async () => assert.fail("probe started workflow work"), reportError: noLog });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+    const port = (server.address() as AddressInfo).port;
+    const host = publicOrigin ? "lab.example" : `127.0.0.1:${port}`;
+    const origin = publicOrigin ?? `http://${host}`;
+    const request = (route: string, headers: Record<string, string> = {}) =>
+      new Promise<{ status: number | undefined; body: unknown; cookie: string[] | undefined }>((resolve, reject) => {
+        http.get({ hostname: "127.0.0.1", port, path: route, headers: { Host: host, ...headers } }, response => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", chunk => { body += chunk; });
+          response.on("error", reject);
+          response.on("end", () => resolve({ status: response.statusCode, body: JSON.parse(body), cookie: response.headers["set-cookie"] }));
+        }).on("error", reject);
+      });
+    for (const draining of [false, true]) {
+      if (draining) server.beginDraining();
+      assert.deepEqual(await request("/health"), { status: 200, body: { ok: true }, cookie: undefined });
+      assert.deepEqual(await request("/ready", { Origin: origin }), {
+        status: draining ? 503 : 200, body: { ready: !draining }, cookie: undefined
+      });
+      for (const route of ["/health", "/ready"]) {
+        const invalidHeaders: Record<string, string>[] = [{ Host: "wrong.example" }, { Origin: "https://wrong.example" },
+          { "Sec-Fetch-Site": "cross-site" }];
+        for (const headers of invalidHeaders) {
+          assert.equal((await request(route, headers)).status, 403);
+        }
+      }
+    }
+    assert.equal(resolveSession.mock.callCount(), 0);
+  }
+});
+
 test("draining rejects new API work before admission while an in-flight question finishes", async t => {
   const gate = deferred();
   const started = deferred();
@@ -1478,7 +1521,7 @@ test("static assets, unmatched methods/routes and unowned reads never allocate a
     assert.equal(response.headers.get("set-cookie"), null);
     await response.arrayBuffer();
   }
-  for (const [route, method] of [["/missing", "GET"], ["/health", "GET"],
+  for (const [route, method] of [["/missing", "GET"],
     ["/api/corpora/import", "GET"], ["/api/settings/openai", "POST"], ["/app.js", "POST"],
     ["/api/corpora/00000000-0000-4000-8000-000000000000/export", "GET"]]) {
     const response = await globalThis.fetch(base + route, { method });

@@ -82,6 +82,14 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
       if ((request.headers.origin && request.headers.origin !== origin) ||
           request.headers["sec-fetch-site"] === "cross-site") throw new WebError(403, "Origin not allowed.");
       const url = new URL(request.url ?? "/", origin);
+      if (request.method === "GET" && url.pathname === "/health") {
+        send(200, { ok: true });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/ready") {
+        send(draining ? 503 : 200, { ready: !draining });
+        return;
+      }
       if (request.method === "GET" && Object.hasOwn(staticFiles, url.pathname)) {
         const [file, type] = staticFiles[url.pathname];
         const content = await readFile(path.isAbsolute(file) ? file : path.join(options.webDirectory, file));
