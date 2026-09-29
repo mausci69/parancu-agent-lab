@@ -62,7 +62,7 @@ export function createWebServer(options: ServerOptions): http.Server {
       if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) throw new WebError(403, "Host not allowed.");
       if ((request.headers.origin && request.headers.origin !== `${protocol}://${host}`) ||
           request.headers["sec-fetch-site"] === "cross-site") throw new WebError(403, "Origin not allowed.");
-      const { keys, setCookie } = sessions.resolve(request.headers.cookie, secure);
+      const { keys, setCookie, requireActive, claimCorpus, requireCorpus } = sessions.resolve(request.headers.cookie, secure);
       if (setCookie) response.setHeader("Set-Cookie", setCookie);
       await keys.context(async () => {
         const url = new URL(request.url ?? "/", `${protocol}://${host}`);
@@ -85,23 +85,30 @@ export function createWebServer(options: ServerOptions): http.Server {
         }
         if (request.method === "POST" && url.pathname === "/api/corpora") {
           const body = await readJson(request);
+          requireActive();
           keys.require();
           keys.checkContent(body);
           // CorpusStore owns runtime validation; browser input is never trusted.
           const info = keys.run(() => options.store.create(body as unknown as Parameters<CorpusStore["create"]>[0]));
+          claimCorpus(info.id);
           send(202, info);
           return;
         }
         if (request.method === "POST" && url.pathname === "/api/corpora/import") {
           const body = await readJson(request, MAX_IMPORT_BYTES);
+          requireActive();
           keys.checkContent(body);
           const info = await options.store.import(body.corpus, body.name, body.language);
+          // Import may outlive the initiating session; never revive its ownership.
+          claimCorpus(info.id);
           send(201, info);
           return;
         }
         const exportMatch = /^\/api\/corpora\/([^/]+)\/export$/.exec(url.pathname);
         if (request.method === "GET" && exportMatch) {
+          requireCorpus(exportMatch[1]);
           const payload = await options.store.export(exportMatch[1]);
+          requireCorpus(exportMatch[1]);
           keys.checkContent(payload);
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8",
             "Content-Disposition": `attachment; filename="${exportFilename(payload.sourceFilename)}"` });
@@ -110,7 +117,9 @@ export function createWebServer(options: ServerOptions): http.Server {
         }
         const corpusMatch = /^\/api\/corpora\/([^/]+)$/.exec(url.pathname);
         if (request.method === "GET" && corpusMatch) {
+          requireCorpus(corpusMatch[1]);
           const info = await options.store.getInfo(corpusMatch[1]);
+          requireCorpus(corpusMatch[1]);
           keys.checkContent(info);
           send(200, info);
           return;
@@ -122,7 +131,9 @@ export function createWebServer(options: ServerOptions): http.Server {
               !body.question.trim() || body.question.length > 4000) {
             throw new WebError(400, "Provide a corpus and a question between 1 and 4,000 characters.");
           }
+          requireCorpus(body.corpusId);
           const { info, corpus } = await options.store.getReady(body.corpusId);
+          requireCorpus(body.corpusId);
           keys.checkContent({ info, corpus });
           if (busyCorpora.has(info.id)) throw new WebError(409, "A question is already being processed for this document.");
           busyCorpora.add(info.id);
@@ -131,6 +142,7 @@ export function createWebServer(options: ServerOptions): http.Server {
             const result = keys.status().ready
               ? await keys.run(() => options.ask(question, corpus))
               : await options.ask(question, corpus, true);
+            requireCorpus(body.corpusId);
             keys.checkContent(result);
             send(200, { corpus: info, ...result });
           } finally { busyCorpora.delete(info.id); }

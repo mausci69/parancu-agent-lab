@@ -64,9 +64,10 @@ function service(options: { fail?: boolean; reject?: boolean } = {}) {
   });
 }
 
-async function startServer(t: TestContext, store: CorpusStore, ask = service(), keys = configuredKeys()) {
-  const sessions = new SessionManager();
+async function startServer(t: TestContext, store: CorpusStore, ask = service(), keys = configuredKeys(),
+  ownedCorpora: string[] = [], sessions = new SessionManager()) {
   const browser = sessions.resolve(undefined);
+  for (const id of ownedCorpora) browser.claimCorpus(id);
   if (keys.status().ready) browser.keys.set(sessionKey);
   const server = createWebServer({ store, ask, sessions, webDirectory, reportError: noLog });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -208,7 +209,7 @@ test("HTTP operational errors remain errors, not no_evidence or upstream detail"
   const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
   const info = store.create(input);
   await store.drain();
-  const base = await startServer(t, store, service({ fail: true }));
+  const base = await startServer(t, store, service({ fail: true }), configuredKeys(), [info.id]);
   const response = await post(base, "/api/questions", { corpusId: info.id, question: "question" });
   assert.equal(response.status, 500);
   const body = await response.text();
@@ -220,7 +221,7 @@ test("HTTP no_evidence is a successful search outcome with rejected candidates",
   const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
   const info = store.create(input);
   await store.drain();
-  const base = await startServer(t, store, service({ reject: true }));
+  const base = await startServer(t, store, service({ reject: true }), configuredKeys(), [info.id]);
   const response = await post(base, "/api/questions", { corpusId: info.id, question: "question" });
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -235,12 +236,17 @@ test("HTTP rejects duplicate questions while one is running", async t => {
   const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
   const info = store.create(input);
   await store.drain();
-  const base = await startServer(t, store, async (q, c) => { started.resolve(); await gate.promise; return service()(q, c); });
+  const base = await startServer(t, store, async (q, c) => { started.resolve(); await gate.promise; return service()(q, c); }, configuredKeys(), [info.id]);
   const body = { corpusId: info.id, question: "question" };
   const first = post(base, "/api/questions", body);
   await started.promise;
   const duplicate = await post(base, "/api/questions", body);
   assert.equal(duplicate.status, 409);
+  const foreign = await globalThis.fetch(base + "/api/questions", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  });
+  assert.equal(foreign.status, 404, "another session must not learn that the corpus is busy");
+  assert.deepEqual(await foreign.json(), { error: "Corpus not found." });
   gate.resolve();
   assert.equal((await first).status, 200);
 });
@@ -309,11 +315,16 @@ test("sessions validate cookies, bound capacity, expire credentials and close re
   assert.match(first.setCookie!, /; HttpOnly; SameSite=Strict; Path=\/$/);
   assert.doesNotMatch(first.setCookie!, /Domain|Expires|Max-Age|Secure/);
   first.keys.set(sessionKey);
+  first.claimCorpus("owned");
+  first.keys.remove();
+  assert.doesNotThrow(() => first.requireCorpus("owned"));
+  first.keys.set(sessionKey);
   assert.equal(sessions.resolve(cookie).keys, first.keys);
   assert.equal(sessions.resolve(cookie).setCookie, undefined);
   const second = sessions.resolve(undefined, true);
   assert.match(second.setCookie!, /; Secure$/);
   assert.notEqual(second.keys, first.keys);
+  assert.throws(() => second.requireCorpus("owned"), WebError);
   assert.equal(await second.keys.context(loadOpenAIKey), null);
   for (const invalid of [SESSION_COOKIE, `${SESSION_COOKIE}=`, `${SESSION_COOKIE}=bad`,
     `${cookie}; ${cookie}`, `${SESSION_COOKIE} =${cookie.split("=")[1]}`, `${SESSION_COOKIE}="${cookie.split("=")[1]}"`]) {
@@ -326,18 +337,24 @@ test("sessions validate cookies, bound capacity, expire credentials and close re
     const replacement = sessions.resolve(cookie);
     assert.notEqual(replacement.setCookie!.split(";")[0], cookie);
     assert.equal(replacement.keys.status().ready, false);
+    assert.throws(() => replacement.requireCorpus("owned"), WebError);
+    assert.throws(() => first.requireCorpus("owned"), WebError);
+    assert.throws(() => first.claimCorpus("owned"), WebError);
     assert.equal(await loadOpenAIKey(), null, "expiry closes the provider retained by running work");
   });
   assert.throws(() => first.keys.set(sessionKey), WebError);
   const unknown = sessions.resolve(`${SESSION_COOKIE}=${"A".repeat(43)}`);
   assert.notEqual(unknown.setCookie!.split(";")[0], `${SESSION_COOKIE}=${"A".repeat(43)}`);
   unknown.keys.set(sessionKey);
+  unknown.claimCorpus("owned");
   await unknown.keys.context(async () => {
     sessions.close();
     assert.equal(await loadOpenAIKey(), null);
   });
   assert.throws(() => sessions.resolve(undefined), WebError);
   assert.throws(() => unknown.keys.set(sessionKey), WebError);
+  assert.throws(() => unknown.requireCorpus("owned"), WebError);
+  assert.throws(() => unknown.claimCorpus("owned"), WebError);
 });
 
 test("browser sessions isolate settings, question credentials and background TXT preparation", async t => {
@@ -381,7 +398,13 @@ test("browser sessions isolate settings, question credentials and background TXT
   assert.equal(imported.status, 201);
   const info = await imported.json();
   const question = { corpusId: info.id, question: "What color?" };
-  assert.equal((await (await a("/api/questions", "POST", question)).json()).result.action, "answer");
+  const ownImport = await a("/api/corpora/import", "POST", { corpus: enriched(), name: "own.json", language: "en" });
+  assert.equal(ownImport.status, 201);
+  const ownInfo = await ownImport.json();
+  const ownQuestion = { ...question, corpusId: ownInfo.id };
+  assert.equal((await a("/api/questions", "POST", question)).status, 404);
+  assert.equal((await b("/api/questions", "POST", ownQuestion)).status, 404);
+  assert.equal((await (await a("/api/questions", "POST", ownQuestion)).json()).result.action, "answer");
   assert.equal((await (await b("/api/questions", "POST", question)).json()).result.action, "retrieval_only");
   assert.equal((await b("/api/corpora", "POST", input)).status, 409);
   const prepared = await a("/api/corpora", "POST", input);
@@ -394,7 +417,7 @@ test("browser sessions isolate settings, question credentials and background TXT
   await store.drain();
   assert.deepEqual(preparationKeys, [sessionKey, sessionKey]);
   assert.equal((await a(settings, "DELETE")).status, 200);
-  assert.equal((await (await a("/api/questions", "POST", question)).json()).result.action, "retrieval_only");
+  assert.equal((await (await a("/api/questions", "POST", ownQuestion)).json()).result.action, "retrieval_only");
   assert.deepEqual(await (await b(settings)).json(), { ready: true, source: "session" });
   assert.equal((await (await b("/api/questions", "POST", question)).json()).result.action, "answer");
   assert.deepEqual(observed, [
@@ -402,12 +425,137 @@ test("browser sessions isolate settings, question credentials and background TXT
     { key: otherKey, retrievalOnly: false }, { key: null, retrievalOnly: true },
     { key: otherKey, retrievalOnly: false }
   ]);
-  assert.equal((await a(`/api/corpora/${info.id}/export`)).status, 200);
+  assert.equal((await a(`/api/corpora/${info.id}/export`)).status, 404);
+  assert.equal((await a(`/api/corpora/${ownInfo.id}/export`)).status, 200);
   assert.equal((await b(`/api/corpora/${info.id}/export`)).status, 200);
   const malformed = await globalThis.fetch(base + settings, { headers: { Cookie: `${SESSION_COOKIE}=bad` } });
   assert.equal(malformed.status, 400);
   assert.equal(malformed.headers.get("set-cookie"), null);
 });
+
+test("foreign, orphaned and unknown corpora are indistinguishable before store access", async t => {
+  const directory = await tempDirectory(t);
+  const store = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const foreign = await store.import(enriched(), "foreign.json", "en");
+  const orphan = await store.import(enriched(), "orphan.json", "en");
+  const sessions = new SessionManager();
+  const owner = sessions.resolve(undefined);
+  owner.claimCorpus(foreign.id);
+  const base = await startServer(t, store, service(), new KeyManager(), [], sessions);
+  for (const method of ["getInfo", "getReady", "export"] as const) {
+    t.mock.method(store, method, async () => { assert.fail("Unowned IDs must not reach CorpusStore"); });
+  }
+  for (const id of [foreign.id, orphan.id, "00000000-0000-4000-8000-000000000000"]) {
+    for (const response of [
+      await fetch(`${base}/api/corpora/${id}`),
+      await fetch(`${base}/api/corpora/${id}/export`),
+      await post(base, "/api/questions", { corpusId: id, question: "What color?" })
+    ]) {
+      assert.equal(response.status, 404);
+      assert.deepEqual(await response.json(), { error: "Corpus not found." });
+    }
+  }
+  assert.equal((await fetch(base + "/api/corpora")).status, 404, "there is no corpus listing API");
+  assert.equal((await readdir(directory)).length, 2, "ownership denial must not delete files");
+});
+
+test("expiry during import cannot claim persisted data or restore ownership", async t => {
+  let now = 0;
+  const sessions = new SessionManager(8, 100, () => now);
+  const directory = await tempDirectory(t);
+  const store = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const base = await startServer(t, store, service(), new KeyManager(), [], sessions);
+  const originalSession = sessions.resolve(browserCookies.get(base));
+  const persisted = deferred();
+  const release = deferred();
+  const originalImport = store.import.bind(store);
+  let id = "";
+  t.mock.method(store, "import", async (...args: Parameters<CorpusStore["import"]>) => {
+    const info = await originalImport(...args);
+    id = info.id;
+    persisted.resolve();
+    await release.promise;
+    return info;
+  });
+  const importing = post(base, "/api/corpora/import", { corpus: enriched(), name: "file.json", language: "en" });
+  await persisted.promise;
+  now = 100;
+  release.resolve();
+  const response = await importing;
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "Corpus not found." });
+  assert.throws(() => originalSession.claimCorpus(id), WebError);
+  assert.throws(() => originalSession.requireCorpus(id), WebError);
+  assert.equal((await fetch(`${base}/api/corpora/${id}`)).status, 404);
+  assert.deepEqual(await readdir(directory), [`${id}.json`]);
+  const restarted = await startServer(t, new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog));
+  assert.equal((await fetch(`${restarted}/api/corpora/${id}/export`)).status, 404, "restart must not infer ownership from disk");
+});
+
+test("TXT preparation finishing after expiry cannot restore corpus access", async t => {
+  let now = 0;
+  const sessions = new SessionManager(8, 100, () => now);
+  const release = deferred();
+  const directory = await tempDirectory(t);
+  const store = new CorpusStore(directory, {
+    prepare: prepareCorpusLocal, enrich: async c => { await release.promise; return c; }
+  }, noLog);
+  const base = await startServer(t, store, service(), configuredKeys(), [], sessions);
+  const owner = sessions.resolve(browserCookies.get(base));
+  const response = await post(base, "/api/corpora", input);
+  assert.equal(response.status, 202);
+  const info = await response.json();
+  assert.doesNotThrow(() => owner.requireCorpus(info.id));
+  try {
+    for (const suffix of ["", "/export"]) {
+      const denied = await globalThis.fetch(`${base}/api/corpora/${info.id}${suffix}`);
+      assert.equal(denied.status, 404, "preparing status must not be visible to another session");
+      assert.deepEqual(await denied.json(), { error: "Corpus not found." });
+    }
+    now = 100;
+    assert.throws(() => owner.requireCorpus(info.id), WebError);
+  } finally { release.resolve(); }
+  await store.drain();
+  assert.equal((await store.getInfo(info.id)).status, "ready");
+  assert.throws(() => owner.claimCorpus(info.id), WebError);
+  assert.equal((await fetch(`${base}/api/corpora/${info.id}`)).status, 404);
+  assert.equal((await post(base, "/api/questions", { corpusId: info.id, question: "What color?" })).status, 404);
+  assert.deepEqual(await readdir(directory), [`${info.id}.json`]);
+});
+
+for (const operation of ["status", "export", "question"] as const) {
+  test(`expiry during asynchronous ${operation} work prevents returning corpus data`, async t => {
+    let now = 0;
+    const sessions = new SessionManager(8, 100, () => now);
+    const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+    const info = await store.import(enriched(), "file.json", "en");
+    const started = deferred();
+    const release = deferred();
+    const wait = async () => { started.resolve(); await release.promise; };
+    const ask = service();
+    const base = await startServer(t, store, async (q, c, retrievalOnly) => {
+      const result = await ask(q, c, retrievalOnly);
+      await wait();
+      return result;
+    }, new KeyManager(), [info.id], sessions);
+    if (operation === "status") {
+      const getInfo = store.getInfo.bind(store);
+      t.mock.method(store, "getInfo", async (id: string) => { const result = await getInfo(id); await wait(); return result; });
+    } else if (operation === "export") {
+      const exportCorpus = store.export.bind(store);
+      t.mock.method(store, "export", async (id: string) => { const result = await exportCorpus(id); await wait(); return result; });
+    }
+    const pending = operation === "question"
+      ? post(base, "/api/questions", { corpusId: info.id, question: "What color?" })
+      : fetch(`${base}/api/corpora/${info.id}${operation === "export" ? "/export" : ""}`);
+    await started.promise;
+    now = 100;
+    release.resolve();
+    const response = await pending;
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Corpus not found." });
+  });
+}
 
 test("web memory keys ignore the environment before use, after removal, and after shutdown", async t => {
   environmentPresent(t);
@@ -526,7 +674,7 @@ test("export round-trip preserves exact workflow corpus and metadata across rest
   const store = new CorpusStore(directory, dependencies, noLog);
   const original = enriched();
   const info = await store.import(original, "Atlas.prepared.json", "it");
-  const base = await startServer(t, store);
+  const base = await startServer(t, store, service(), configuredKeys(), [info.id]);
   const response = await fetch(base + "/api/corpora/" + info.id + "/export");
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-disposition")!, /Atlas.prepared.json/);

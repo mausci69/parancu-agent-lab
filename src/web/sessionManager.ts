@@ -3,7 +3,47 @@ import { KeyManager } from "./keyManager";
 import { WebError } from "./corpusStore";
 
 export const SESSION_COOKIE = "parancu_session";
-type Session = { keys: KeyManager; lastSeen: number };
+class Session {
+  readonly keys = new KeyManager();
+  readonly #corpora = new Set<string>();
+  #closed = false;
+  lastSeen: number;
+
+  constructor(private readonly idleMs: number, private readonly now: () => number) {
+    this.lastSeen = now();
+  }
+
+  requireActive() {
+    if (this.now() - this.lastSeen >= this.idleMs) this.close();
+    if (this.#closed) throw new WebError(404, "Corpus not found.");
+  }
+
+  claimCorpus(id: string) {
+    this.requireActive();
+    this.#corpora.add(id);
+  }
+
+  requireCorpus(id: string) {
+    this.requireActive();
+    if (!this.#corpora.has(id)) throw new WebError(404, "Corpus not found.");
+  }
+
+  close() {
+    this.#closed = true;
+    this.#corpora.clear();
+    this.keys.close();
+  }
+}
+
+type SessionAccess = Pick<Session, "keys" | "requireActive" | "claimCorpus" | "requireCorpus">;
+function access(session: Session): SessionAccess {
+  return {
+    keys: session.keys,
+    requireActive: () => session.requireActive(),
+    claimCorpus: id => session.claimCorpus(id),
+    requireCorpus: id => session.requireCorpus(id)
+  };
+}
 
 /** Credentials and session identifiers live only in this process. */
 export class SessionManager {
@@ -27,13 +67,13 @@ export class SessionManager {
     const now = this.now();
     for (const [id, session] of this.sessions) {
       if (now - session.lastSeen >= this.idleMs) {
-        session.keys.close();
+        session.close();
         this.sessions.delete(id);
       }
     }
   }
 
-  resolve(cookie: string | undefined, secure = false): { keys: KeyManager; setCookie?: string } {
+  resolve(cookie: string | undefined, secure = false): SessionAccess & { setCookie?: string } {
     if (this.closed) throw new WebError(503, "The server is shutting down.");
     let id: string | undefined;
     for (const part of cookie?.split(";") ?? []) {
@@ -53,15 +93,15 @@ export class SessionManager {
     const existing = id === undefined ? undefined : this.sessions.get(id);
     if (existing) {
       existing.lastSeen = this.now();
-      return { keys: existing.keys };
+      return access(existing);
     }
     // Do not evict another browser's active credentials to admit a new session.
     if (this.sessions.size >= this.capacity) throw new WebError(503, "Session capacity reached. Try again later.");
     do { id = randomBytes(32).toString("base64url"); } while (this.sessions.has(id));
-    const keys = new KeyManager();
-    this.sessions.set(id, { keys, lastSeen: this.now() });
+    const session = new Session(this.idleMs, this.now);
+    this.sessions.set(id, session);
     return {
-      keys,
+      ...access(session),
       setCookie: `${SESSION_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/${secure ? "; Secure" : ""}`
     };
   }
@@ -69,7 +109,7 @@ export class SessionManager {
   close() {
     this.closed = true;
     clearInterval(this.timer);
-    for (const session of this.sessions.values()) session.keys.close();
+    for (const session of this.sessions.values()) session.close();
     this.sessions.clear();
   }
 }

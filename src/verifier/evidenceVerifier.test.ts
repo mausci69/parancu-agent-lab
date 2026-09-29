@@ -551,6 +551,7 @@ test("production Markdown regression through HTTP, web adapter, real generation 
     await rm(directory, { recursive: true, force: true });
   });
   const info = store.create({ name: "qa.txt", text: evidence, language: "en" });
+  session.claimCorpus(info.id);
   await store.drain();
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/questions`, {
