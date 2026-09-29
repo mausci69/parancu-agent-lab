@@ -2,6 +2,15 @@ import { isIP } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+export function readWebOpenAITimeout(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.WEB_OPENAI_TIMEOUT_MS ?? "30000";
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error("WEB_OPENAI_TIMEOUT_MS must be a positive safe integer.");
+  }
+  return value;
+}
+
 /** Only an explicitly configured HTTPS origin enables public mode. */
 export function parsePublicOrigin(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
@@ -14,6 +23,7 @@ export function parsePublicOrigin(value: string | undefined): string | undefined
 }
 
 export function readWebRuntimeConfig(env: NodeJS.ProcessEnv = process.env) {
+  readWebOpenAITimeout(env);
   const publicOrigin = parsePublicOrigin(env.WEB_PUBLIC_ORIGIN);
   if (env.NODE_ENV === "production" && !publicOrigin) {
     throw new Error("WEB_PUBLIC_ORIGIN is required when NODE_ENV=production.");

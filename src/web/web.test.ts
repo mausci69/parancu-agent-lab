@@ -10,7 +10,7 @@ import { prepareCorpusLocal } from "../../services/parancu-api/src/local/prepare
 import type { RetrieveResult } from "../../services/parancu-api/src/local/retrieval";
 import { CorpusStore, MAX_TEXT_BYTES, WebError } from "./corpusStore";
 import { createWebServer, purgeWebCorpora } from "./server";
-import { parsePublicOrigin, readWebRuntimeConfig } from "./runtimeConfig";
+import { parsePublicOrigin, readWebRuntimeConfig, readWebOpenAITimeout } from "./runtimeConfig";
 import { createWorkflowService } from "./workflowService";
 import { KeyManager } from "./keyManager";
 import { SessionManager, SESSION_COOKIE } from "./sessionManager";
@@ -925,6 +925,68 @@ test("real generation and verification use the memory key; upstream failures can
     return true;
   });
   assert.equal(calls, 3);
+});
+
+test("OpenAI timeout configuration defaults and strictly validates overrides", () => {
+  assert.equal(readWebOpenAITimeout({}), 30_000);
+  assert.equal(readWebOpenAITimeout({ WEB_OPENAI_TIMEOUT_MS: "1234" }), 1234);
+  for (const value of ["", "0", "-1", "1.5", " 2", "2e2", "Infinity", "9007199254740992"]) {
+    assert.throws(() => readWebRuntimeConfig({ WEB_OPENAI_TIMEOUT_MS: value }), /WEB_OPENAI_TIMEOUT_MS/);
+  }
+});
+
+test("OpenAI timeout aborts stalled fetch and response bodies with sanitized errors", async t => {
+  const keys = configuredKeys();
+  for (const phase of ["fetch", "body"]) {
+    let expire!: () => void;
+    let signal!: AbortSignal;
+    let delay: number | undefined;
+    const started = deferred();
+    const timer = t.mock.method(globalThis, "setTimeout", (callback: () => void, ms?: number) => {
+      expire = callback;
+      delay = ms;
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    });
+    const clear = t.mock.method(globalThis, "clearTimeout", () => {});
+    const transport = t.mock.method(globalThis, "fetch", async (_url: unknown, options?: RequestInit) => {
+      signal = options!.signal!;
+      const stalled = () => new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error(sessionKey)), { once: true });
+        started.resolve();
+      });
+      if (phase === "fetch") return stalled();
+      return { ok: true, json: stalled } as unknown as Response;
+    });
+    const request = keys.run(() => requestOpenAI({ input: "private prompt" }));
+    const rejected = assert.rejects(request, error => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "OpenAI request failed. Check your key, account access, and connection.");
+      assert.equal(error.cause, undefined);
+      return true;
+    });
+    await started.promise;
+    assert.equal(delay, readWebOpenAITimeout());
+    assert.equal(signal.aborted, false);
+    expire();
+    await rejected;
+    assert.equal(signal.aborted, true);
+    assert.equal(clear.mock.callCount(), 1);
+    transport.mock.restore(); clear.mock.restore(); timer.mock.restore();
+  }
+});
+
+test("successful OpenAI requests preserve their payload and clear the deadline", async t => {
+  const clear = t.mock.method(globalThis, "clearTimeout", () => {});
+  t.mock.method(globalThis, "setTimeout", () => 1 as unknown as ReturnType<typeof setTimeout>);
+  let signal!: AbortSignal;
+  const payload = { output_text: "Atlas is blue." };
+  t.mock.method(globalThis, "fetch", async (_url: unknown, options?: RequestInit) => {
+    signal = options!.signal!;
+    return new Response(JSON.stringify(payload));
+  });
+  assert.deepEqual(await configuredKeys().run(() => requestOpenAI({})), payload);
+  assert.equal(signal.aborted, false);
+  assert.equal(clear.mock.callCount(), 1);
 });
 
 test("transport exceptions and successful payloads containing credentials are sanitized", async t => {
