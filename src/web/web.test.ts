@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import vm from "node:vm";
+import Module from "node:module";
+import { register } from "tsx/cjs/api";
 import { test, type TestContext } from "node:test";
 import type { AddressInfo } from "node:net";
 import { prepareCorpusLocal } from "../../services/parancu-api/src/local/prepareCorpus";
@@ -237,15 +239,66 @@ test("HTTP no_evidence is a successful search outcome with rejected candidates",
   assert.equal(body.retrievedEvidence.length, 3);
 });
 
+test("exported E5 initializer shares lazy initialization without running inference", async t => {
+  const filename = path.resolve(__dirname, "../../services/parancu-api/src/lib/embeddings.ts");
+  const loader = register({ namespace: "e5-initializer-test" });
+  t.after(() => loader.unregister());
+  let loads = 0;
+  let runs = 0;
+  let available = false;
+  const gate = deferred();
+  const originalRequire = Module.prototype.require;
+  const mockedRequire = t.mock.method(Module.prototype, "require", function (this: NodeJS.Module, name: string) {
+    if (!this.filename.startsWith(filename)) return originalRequire.call(this, name);
+    if (name === "node:fs") return { existsSync: () => available, readFileSync: () => "{}" };
+    if (name === "@huggingface/tokenizers") return { Tokenizer: class {
+      encode() { return { ids: [0, 2] }; }
+    } };
+    if (name === "onnxruntime-node") return {
+      Tensor: class {},
+      InferenceSession: { create: async () => {
+        loads++;
+        await gate.promise;
+        return { inputNames: [], outputNames: [], run: async () => {
+          runs++;
+          return { sentence_embedding: { dims: [1, 384], data: new Float32Array(384).fill(0.5) } };
+        } };
+      } }
+    };
+    return originalRequire.call(this, name);
+  });
+  let exports: typeof import("../../services/parancu-api/src/lib/embeddings");
+  try { exports = loader.require(filename, __filename); }
+  finally { mockedRequire.mock.restore(); }
+  t.mock.method(console, "log", noLog);
+  await assert.rejects(exports.initializeE5(), /E5 model not found/);
+  available = true;
+  const first = exports.initializeE5();
+  const second = exports.initializeE5();
+  assert.equal(loads, 1);
+  gate.resolve();
+  await Promise.all([first, second]);
+  await exports.initializeE5();
+  assert.equal(loads, 1);
+  assert.equal(runs, 0);
+  assert.deepEqual(Array.from(await exports.embedMany([])), []);
+  assert.deepEqual(Array.from(await exports.embedOne("query")), Array(384).fill(0.5));
+  const passages = await exports.embedMany(["passage"]);
+  assert.deepEqual(Array.from(passages[0]), Array(384).fill(0.5));
+  assert.equal(loads, 1);
+  assert.equal(runs, 2);
+});
+
 test("health and readiness are session-free, reflect draining, and preserve Host/origin protection", async t => {
   for (const publicOrigin of [undefined, "https://lab.example"]) {
+    let e5Ready = false;
     const sessions = new SessionManager();
     const resolveSession = t.mock.method(sessions, "resolve", () => assert.fail("probe allocated a session"));
     const store = new CorpusStore(await tempDirectory(t), {
       prepare: () => assert.fail("probe prepared corpus data"),
       enrich: async () => assert.fail("probe enriched corpus data")
     }, noLog);
-    const server = createWebServer({ store, sessions, publicOrigin, webDirectory,
+    const server = createWebServer({ store, sessions, publicOrigin, webDirectory, isE5Ready: () => e5Ready,
       ask: async () => assert.fail("probe started workflow work"), reportError: noLog });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
@@ -262,6 +315,15 @@ test("health and readiness are session-free, reflect draining, and preserve Host
           response.on("end", () => resolve({ status: response.statusCode, body: JSON.parse(body), cookie: response.headers["set-cookie"] }));
         }).on("error", reject);
       });
+    assert.deepEqual(await request("/ready"), { status: 503, body: { ready: false }, cookie: undefined });
+    assert.deepEqual(await request("/health"), { status: 200, body: { ok: true }, cookie: undefined });
+    const initialize = async (initializeE5: () => Promise<void>) => {
+      await initializeE5();
+      e5Ready = true;
+    };
+    await assert.rejects(initialize(async () => { throw new Error("PRIVATE_MODEL_PATH"); }));
+    assert.deepEqual(await request("/ready"), { status: 503, body: { ready: false }, cookie: undefined });
+    await initialize(async () => {});
     for (const draining of [false, true]) {
       if (draining) server.beginDraining();
       assert.deepEqual(await request("/health"), { status: 200, body: { ok: true }, cookie: undefined });

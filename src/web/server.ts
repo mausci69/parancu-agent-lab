@@ -17,6 +17,7 @@ type ServerOptions = {
   reportError?: (error: unknown) => void;
   sessions?: SessionManager;
   publicOrigin?: string;
+  isE5Ready?: () => boolean;
 };
 const staticFiles: Record<string, [string, string]> = {
   "/": ["index.html", "text/html; charset=utf-8"],
@@ -87,7 +88,8 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
         return;
       }
       if (request.method === "GET" && url.pathname === "/ready") {
-        send(draining ? 503 : 200, { ready: !draining });
+        const ready = !draining && (options.isE5Ready?.() ?? false);
+        send(ready ? 200 : 503, { ready });
         return;
       }
       if (request.method === "GET" && Object.hasOwn(staticFiles, url.pathname)) {
@@ -262,6 +264,8 @@ async function main(): Promise<void> {
   let server: ReturnType<typeof createWebServer> | undefined;
   try {
     await purgeWebCorpora(corpusDirectory);
+    const { initializeE5 } = await import("../../services/parancu-api/src/lib/embeddings.js");
+    await initializeE5();
     const { prepareCorpusLocal } = await import("../../services/parancu-api/src/local/prepareCorpus.js");
     const { enrichPreparedCorpusWithOpenAI } = await import("../../services/parancu-api/src/lib/gen/openaiPrepare.js");
     const { createWorkflowService } = await import("./workflowService.js");
@@ -269,7 +273,8 @@ async function main(): Promise<void> {
     store = new CorpusStore(corpusDirectory, {
       prepare: prepareCorpusLocal, enrich: enrichPreparedCorpusWithOpenAI
     }, console.error, KeyManager.checkContent, resources);
-    server = createWebServer({ store, publicOrigin, ask: createWorkflowService(undefined, resources), webDirectory: path.join(root, "apps/web") });
+    server = createWebServer({ store, publicOrigin, isE5Ready: () => true,
+      ask: createWorkflowService(undefined, resources), webDirectory: path.join(root, "apps/web") });
     await new Promise<void>((resolve, reject) => {
       server!.once("error", reject);
       server!.listen(port, host, () => {

@@ -140,6 +140,8 @@ async function ensureModels(): Promise<void> {
   }
 }
 
+export { ensureModels as initializeE5 };
+
 function prefixText(
   text: string,
   mode: E5Mode
