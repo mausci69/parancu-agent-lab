@@ -7,7 +7,7 @@ import type { PrepareResult } from "../../services/parancu-api/src/local/prepare
 import { KeyManager } from "./keyManager";
 import { SessionManager } from "./sessionManager";
 import { exportFilename } from "./corpusFormat";
-import { parsePublicOrigin, readWebRuntimeConfig } from "./runtimeConfig";
+import { parsePublicOrigin, readWebRuntimeConfig, readWebShutdownTimeout } from "./runtimeConfig";
 import { readWebLimits, WebResources, QUESTION_REQUEST_BYTES, TXT_ENVELOPE_BYTES } from "./resourceLimits";
 
 type ServerOptions = {
@@ -220,8 +220,32 @@ export async function purgeWebCorpora(corpusDirectory: string): Promise<void> {
   await mkdir(corpusDirectory, { recursive: true, mode: 0o700 });
 }
 
+class ShutdownTimeoutError extends Error {
+  constructor() { super("Server shutdown timed out."); }
+}
+
+export async function withShutdownDeadline(work: () => Promise<void>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    let remaining = timeoutMs;
+    const schedule = () => {
+      // Avoid Node's overflow clamping for valid large configuration values.
+      const delay = Math.min(remaining, 2_147_483_647);
+      timer = setTimeout(() => {
+        remaining -= delay;
+        if (remaining > 0) schedule();
+        else reject(new ShutdownTimeoutError());
+      }, delay);
+    };
+    schedule();
+  });
+  try { await Promise.race([Promise.resolve().then(work), deadline]); }
+  finally { clearTimeout(timer); }
+}
+
 async function main(): Promise<void> {
   const { port, host, publicOrigin, corpusDirectory } = readWebRuntimeConfig();
+  const shutdownTimeoutMs = readWebShutdownTimeout();
   const resources = new WebResources(readWebLimits());
   // The shared facade loads an SDK only with explicit observability opt-in.
   const { langfuseSdk } = await import("../observability/langfuse.js");
@@ -248,7 +272,7 @@ async function main(): Promise<void> {
     console.log(`ParancU Agent Lab: ${publicOrigin ?? `http://127.0.0.1:${port}`}`);
     console.log("Document preparation and questions use OpenAI. Press Ctrl+C to shut down after current operations finish.");
     await new Promise<void>((resolve, reject) => {
-      const stop = () => { server!.beginDraining(); server!.closeSessions(); cleanup(); resolve(); };
+      const stop = () => { server!.beginDraining(); cleanup(); resolve(); };
       const fail = (error: Error) => { cleanup(); reject(error); };
       const cleanup = () => {
         process.removeListener("SIGINT", stop);
@@ -263,20 +287,31 @@ async function main(): Promise<void> {
     primaryFailure = true;
     throw error;
   } finally {
-    server?.beginDraining();
-    server?.closeSessions();
     try {
-      if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
-      await store?.drain();
+      await withShutdownDeadline(async () => {
+        server?.beginDraining();
+        server?.closeSessions();
+        try {
+          if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
+          await store?.drain();
+        } catch (error) {
+          console.error("Server shutdown failed.");
+          if (!primaryFailure) process.exitCode = 1;
+        } finally {
+          try { await langfuseSdk.shutdown(); }
+          catch (error) {
+            if (!primaryFailure) throw error;
+            console.error("Observability shutdown failed.");
+          }
+        }
+      }, shutdownTimeoutMs);
     } catch (error) {
-      console.error("Server shutdown failed.");
-      if (!primaryFailure) process.exitCode = 1;
-    } finally {
-      try { await langfuseSdk.shutdown(); }
-      catch (error) {
-        if (!primaryFailure) throw error;
-        console.error("Observability shutdown failed.");
+      if (error instanceof ShutdownTimeoutError) {
+        console.error("Server shutdown timed out.");
+        // Outstanding handles may otherwise keep the process alive indefinitely.
+        process.exit(1);
       }
+      throw error;
     }
   }
 }

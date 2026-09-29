@@ -9,8 +9,8 @@ import type { AddressInfo } from "node:net";
 import { prepareCorpusLocal } from "../../services/parancu-api/src/local/prepareCorpus";
 import type { RetrieveResult } from "../../services/parancu-api/src/local/retrieval";
 import { CorpusStore, MAX_TEXT_BYTES, WebError } from "./corpusStore";
-import { createWebServer, purgeWebCorpora } from "./server";
-import { parsePublicOrigin, readWebRuntimeConfig, readWebOpenAITimeout } from "./runtimeConfig";
+import { createWebServer, purgeWebCorpora, withShutdownDeadline } from "./server";
+import { parsePublicOrigin, readWebRuntimeConfig, readWebOpenAITimeout, readWebShutdownTimeout } from "./runtimeConfig";
 import { createWorkflowService } from "./workflowService";
 import { KeyManager } from "./keyManager";
 import { SessionManager, SESSION_COOKIE } from "./sessionManager";
@@ -979,6 +979,56 @@ test("real generation and verification use the memory key; upstream failures can
     return true;
   });
   assert.equal(calls, 3);
+});
+
+test("shutdown timeout defaults and strictly validates overrides", () => {
+  assert.equal(readWebShutdownTimeout({}), 15_000);
+  assert.equal(readWebShutdownTimeout({ WEB_SHUTDOWN_TIMEOUT_MS: "1234" }), 1234);
+  for (const value of ["", "0", "-1", "1.5", " 2", "2e2", "Infinity", "9007199254740992"]) {
+    assert.throws(() => readWebRuntimeConfig({ WEB_SHUTDOWN_TIMEOUT_MS: value }), /WEB_SHUTDOWN_TIMEOUT_MS/);
+  }
+});
+
+test("graceful shutdown completes and clears its deadline", async t => {
+  const token = {} as ReturnType<typeof setTimeout>;
+  const timer = t.mock.method(globalThis, "setTimeout", () => token);
+  const clear = t.mock.method(globalThis, "clearTimeout", () => {});
+  const steps: string[] = [];
+  await withShutdownDeadline(async () => {
+    steps.push("draining", "sessions");
+    await Promise.resolve();
+    steps.push("http", "corpus", "cleanup");
+  }, 1234);
+  assert.deepEqual(steps, ["draining", "sessions", "http", "corpus", "cleanup"]);
+  assert.equal(timer.mock.calls[0].arguments[1], 1234);
+  assert.equal(clear.mock.callCount(), 1);
+  assert.equal(clear.mock.calls[0].arguments[0], token);
+});
+
+test("stalled shutdown stops waiting at its deadline with a fixed error", async t => {
+  let expire!: () => void;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void) => {
+    expire = callback;
+    return {} as ReturnType<typeof setTimeout>;
+  });
+  const clear = t.mock.method(globalThis, "clearTimeout", () => {});
+  const started = deferred();
+  const pending = deferred();
+  const shutdown = withShutdownDeadline(async () => {
+    started.resolve();
+    await pending.promise;
+  }, 15_000);
+  const rejected = assert.rejects(shutdown, error => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.message, "Server shutdown timed out.");
+    assert.equal(error.cause, undefined);
+    return true;
+  });
+  await started.promise;
+  expire();
+  await rejected;
+  assert.equal(clear.mock.callCount(), 1);
+  pending.resolve();
 });
 
 test("OpenAI timeout configuration defaults and strictly validates overrides", () => {
