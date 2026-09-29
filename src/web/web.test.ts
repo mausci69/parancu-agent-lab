@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -9,7 +9,7 @@ import type { AddressInfo } from "node:net";
 import { prepareCorpusLocal } from "../../services/parancu-api/src/local/prepareCorpus";
 import type { RetrieveResult } from "../../services/parancu-api/src/local/retrieval";
 import { CorpusStore, MAX_TEXT_BYTES, WebError } from "./corpusStore";
-import { createWebServer } from "./server";
+import { createWebServer, purgeWebCorpora } from "./server";
 import { parsePublicOrigin, readWebRuntimeConfig } from "./runtimeConfig";
 import { createWorkflowService } from "./workflowService";
 import { KeyManager } from "./keyManager";
@@ -314,6 +314,33 @@ test("web corpus directory overrides resolve to absolute paths and reject blank 
   for (const value of ["", " ", "\t\n"]) {
     assert.throws(() => readWebRuntimeConfig({ WEB_CORPUS_DIR: value }), /WEB_CORPUS_DIR/);
   }
+});
+
+test("startup corpus purge removes stale contents without following symlinks outside the directory", async t => {
+  const directory = await tempDirectory(t);
+  const corpora = path.join(directory, "corpora");
+  const outside = path.join(directory, "outside.json");
+  await mkdir(path.join(corpora, "nested"), { recursive: true });
+  await writeFile(path.join(corpora, "stale.json"), "private corpus");
+  await writeFile(path.join(corpora, "nested", "stale.tmp"), "unfinished corpus");
+  await writeFile(outside, "keep");
+  await symlink(outside, path.join(corpora, "linked.json"));
+  await purgeWebCorpora(corpora);
+  assert.deepEqual(await readdir(corpora), []);
+  assert.equal(await readFile(outside, "utf8"), "keep");
+});
+
+test("startup corpus purge creates a missing directory and leaves it empty", async t => {
+  const corpora = path.join(await tempDirectory(t), "missing", "corpora");
+  await purgeWebCorpora(corpora);
+  assert.deepEqual(await readdir(corpora), []);
+});
+
+test("startup corpus purge rejects filesystem failures", async t => {
+  const blocked = path.join(await tempDirectory(t), "blocked");
+  await writeFile(blocked, "keep");
+  await assert.rejects(purgeWebCorpora(path.join(blocked, "corpora")));
+  assert.equal(await readFile(blocked, "utf8"), "keep");
 });
 
 for (const publicOrigin of [undefined, "https://lab.example", "https://lab.example:8443"]) {

@@ -1,5 +1,5 @@
 import http from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { CorpusStore, WebError } from "./corpusStore";
 import type { WebWorkflowResult } from "./workflowService";
@@ -209,6 +209,12 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
   return Object.assign(server, { closeSessions: () => sessions.close() });
 }
 
+export async function purgeWebCorpora(corpusDirectory: string): Promise<void> {
+  // Remove the configured tree directly; recursive rm does not follow child symlinks.
+  await rm(corpusDirectory, { recursive: true, force: true });
+  await mkdir(corpusDirectory, { recursive: true, mode: 0o700 });
+}
+
 async function main(): Promise<void> {
   const { port, host, publicOrigin, corpusDirectory } = readWebRuntimeConfig();
   const resources = new WebResources(readWebLimits());
@@ -218,6 +224,7 @@ async function main(): Promise<void> {
   let store: CorpusStore | undefined;
   let server: ReturnType<typeof createWebServer> | undefined;
   try {
+    await purgeWebCorpora(corpusDirectory);
     const { prepareCorpusLocal } = await import("../../services/parancu-api/src/local/prepareCorpus.js");
     const { enrichPreparedCorpusWithOpenAI } = await import("../../services/parancu-api/src/lib/gen/openaiPrepare.js");
     const { createWorkflowService } = await import("./workflowService.js");
