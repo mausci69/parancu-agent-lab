@@ -174,7 +174,7 @@ export function createWebServer(options: ServerOptions): http.Server {
 
 async function main(): Promise<void> {
   const { port, host, publicOrigin } = readWebRuntimeConfig();
-  // This is the only SDK bootstrap. Importing createWebServer in tests has no tracing side effects.
+  // The shared facade loads an SDK only with explicit observability opt-in.
   const { langfuseSdk } = await import("../observability/langfuse.js");
   let primaryFailure = false;
   let store: CorpusStore | undefined;
@@ -219,18 +219,18 @@ async function main(): Promise<void> {
       if (server?.listening) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
       await store?.drain();
     } catch (error) {
-      console.error("Server shutdown failed:", error);
+      console.error("Server shutdown failed.");
       if (!primaryFailure) process.exitCode = 1;
     } finally {
       try { await langfuseSdk.shutdown(); }
       catch (error) {
         if (!primaryFailure) throw error;
-        console.error("Langfuse shutdown also failed:", error);
+        console.error("Observability shutdown failed.");
       }
     }
   }
 }
 
 if (require.main === module) {
-  void main().catch(error => { console.error(error); process.exitCode = 1; });
+  void main().catch(() => { console.error("Web server startup or operation failed. Check runtime configuration."); process.exitCode = 1; });
 }

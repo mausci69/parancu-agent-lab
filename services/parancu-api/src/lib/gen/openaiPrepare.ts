@@ -9,6 +9,7 @@
 import type { Chunk, PrepareResult } from "../../local/prepareCorpus.js";
 import { checkOpenAIContent, requestOpenAI } from "../../local/openaiRequest.js";
 import { embedMany } from "../embeddings.js";
+import { logOperational } from "../../local/diagnostics.js";
 
 
 const OPENAI_MODEL =
@@ -31,7 +32,7 @@ type ChunkMetadata = {
   answerFocus: string;
 };
 
-console.log("OPENAI MODEL:", OPENAI_MODEL);
+
 
 function extractTextFromResponse(payload: any): string {
   if (
@@ -309,11 +310,7 @@ export async function enrichPreparedCorpusWithOpenAI(
   const corpusLanguage =
     options.corpusLanguage ?? "en";
 
-  console.log("[CORPUS LANGUAGE SELECTED]", {
-    corpusLanguage,
-    label:
-      CORPUS_LANGUAGE_LABELS[corpusLanguage],
-  });
+  logOperational("preparation-start", { chunkCount: prepared.chunks.length });
 
   for (const chunk of prepared.chunks) {
     const metadata =
@@ -337,24 +334,7 @@ export async function enrichPreparedCorpusWithOpenAI(
       answerFocus,
     ]);
 
-    console.log("[PREPARED CHUNK]", {
-      chunkId: chunk.id,
-      corpusLanguage,
-      summary,
-      guidingQuestion,
-      answerFocus,
-      guidingQuestionWords:
-        guidingQuestion
-          .split(/\s+/)
-          .filter(Boolean)
-          .length,
-      hasGuidingQuestionEmbedding:
-        guidingQuestionEmbedding.length > 0,
-      hasAnswerFocusEmbedding:
-        answerFocusEmbedding.length > 0,
-      embeddingEngine:
-        "local-multilingual-e5-small-onnx",
-    });
+    logOperational("prepared-chunk", { chunkIndex: chunk.id });
 
     enrichedChunks.push({
       ...chunk,

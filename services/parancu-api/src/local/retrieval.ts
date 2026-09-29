@@ -17,6 +17,7 @@
 
 import type { PrepareResult, Chunk } from "./prepareCorpus.js";
 import { embedOne } from "../lib/embeddings.js";
+import { logOperational } from "./diagnostics.js";
 
 const DEFAULT_MIN_EXACT_ANCHOR_LENGTH = 2;
 const DEFAULT_MIN_SOFT_KEYWORD_LENGTH = 4;
@@ -489,24 +490,8 @@ function buildRankingContext(
   };
 }
 
-function logRankingContext(
-  context: RankingContext
-): void {
-  console.log(
-    "[SEMANTIC ANCHOR QUERY KEYWORDS]",
-    JSON.stringify(
-      {
-        queryKeywords: context.queryKeywords,
-        rareQueryKeywords:
-          context.rareQueryKeywords,
-        keywordDf: Object.fromEntries(
-          context.keywordDf.entries()
-        ),
-      },
-      null,
-      2
-    )
-  );
+function logRankingContext(context: RankingContext): void {
+  logOperational("retrieval-query", { keywordCount: context.queryKeywords.length, rareKeywordCount: context.rareQueryKeywords.length });
 }
 
 function rankChunks(
@@ -563,47 +548,8 @@ function rankChunks(
     .sort((a, b) => b.score - a.score);
 }
 
-function logTopCandidates(
-  ranked: RankedChunk[],
-  limit: number
-): void {
-  const topItems = ranked.slice(0, limit);
-
-  console.log(
-    "[SEMANTIC ANCHOR RETRIEVE TOP 5]",
-    JSON.stringify(
-      topItems.map((item) => ({
-        idx: item.idx,
-        score: item.score,
-        semanticScore: item.semanticScore,
-        anchorScore: item.anchorScore,
-        exactAnchorScore:
-          item.exactAnchorScore,
-        softKeywordScore:
-          item.softKeywordScore,
-        sentenceIds: item.sentenceIds,
-        guidingQuestion: String(
-          item.chunk.guiding_question || ""
-        ).slice(0, 180),
-        summary: String(
-          item.chunk.summary || ""
-        ).slice(0, 180),
-        chunkText: String(
-          item.chunk.text || ""
-        ).slice(0, 180),
-        hasGuidingQuestionEmbedding:
-          Array.isArray(
-            item.chunk.guiding_question_embedding
-          )
-            ? item.chunk
-                .guiding_question_embedding
-                .length > 0
-            : false,
-      })),
-      null,
-      2
-    )
-  );
+function logTopCandidates(ranked: RankedChunk[], limit: number): void {
+  logOperational("retrieval-candidates", { candidateCount: Math.min(ranked.length, limit) });
 }
 
 export function buildSemanticIndex(
@@ -694,19 +640,7 @@ export async function retrieveTop(
 
   const result = rankedChunkToResult(top);
 
-  console.log(
-    "[SEMANTIC ANCHOR RETRIEVE RAW SCORE]",
-    top.score,
-    "=>",
-    result.score
-  );
-
-  console.log(
-    "[SEMANTIC ANCHOR RETRIEVE RAW SEMANTIC]",
-    top.semanticScore,
-    "=>",
-    result.cosine_score
-  );
+  logOperational("retrieval-score", { score: result.score, cosineScore: result.cosine_score });
 
   return result;
 }

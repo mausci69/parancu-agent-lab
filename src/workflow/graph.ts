@@ -4,7 +4,7 @@ import {
   START,
   StateGraph
 } from "@langchain/langgraph";
-import { startActiveObservation } from "@langfuse/tracing";
+import { startActiveObservation } from "../observability/langfuse";
 
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
 import {
@@ -65,11 +65,7 @@ export function createWorkflowGraph(
     return startActiveObservation(
       "retrieve",
       async (span) => {
-        span.update({
-          input: {
-            question: state.question
-          }
-        });
+        span.update({ chunkCount: state.corpus.chunks.length });
 
         const candidates = await dependencies.retrieveCandidates(
           state.question,
@@ -77,16 +73,7 @@ export function createWorkflowGraph(
           5
         );
 
-        span.update({
-          output: {
-            candidateCount: candidates.length,
-            candidates: candidates.map((candidate, index) => ({
-              rank: index + 1,
-              chunkIndex: candidate.chunk_index,
-              score: candidate.score
-            }))
-          }
-        });
+        span.update({ candidateCount: candidates.length });
 
         return {
           candidates,
@@ -116,24 +103,12 @@ export function createWorkflowGraph(
     return startActiveObservation(
       "generate",
       async (span) => {
-        span.update({
-          input: {
-            candidateRank: state.candidateIndex + 1,
-            chunkIndex: candidate.chunk_index,
-            evidence: candidate.chunk
-          }
-        });
+        span.update({ candidateRank: state.candidateIndex + 1, chunkIndex: candidate.chunk_index });
 
         const answer = await dependencies.generateAnswer(
           state.question,
           candidate.chunk
         );
-
-        span.update({
-          output: {
-            answer
-          }
-        });
 
         return {
           answer
@@ -159,13 +134,7 @@ export function createWorkflowGraph(
     return startActiveObservation(
       "verify",
       async (span) => {
-        span.update({
-          input: {
-            candidateRank: state.candidateIndex + 1,
-            answer,
-            evidence: candidate.chunk
-          }
-        });
+        span.update({ candidateRank: state.candidateIndex + 1, chunkIndex: candidate.chunk_index });
 
         const verification = await dependencies.verifyAnswer(
           state.question,
@@ -173,9 +142,7 @@ export function createWorkflowGraph(
           candidate.chunk
         );
 
-        span.update({
-          output: verification
-        });
+        span.update({ supported: verification.supported, missingConceptCount: verification.missingConcepts?.length ?? 0 });
 
         return {
           supported: verification.supported,
@@ -191,7 +158,7 @@ export function createWorkflowGraph(
       const original = state.candidates[state.candidateIndex];
       const query = `What is ${state.missingConcepts[0]}?`;
       const excluded = new Set(state.candidates.slice(0, state.candidateIndex + 1).map(c => c.chunk_index));
-      span.update({ input: { question: state.question, query, missingConcepts: state.missingConcepts } });
+      span.update({ missingConceptCount: state.missingConcepts.length });
       // Retrieve a fresh ranking with ParancU, retaining original positional indices.
       // Filtering is by provenance only, never by lexical matching of corpus content.
       const ranked = state.corpus.chunks.length
@@ -209,16 +176,16 @@ export function createWorkflowGraph(
         const candidate: WorkflowEvidence = { chunkIndex: c.chunk_index, text: c.chunk,
           candidateRank: index + 1, score: c.score, retrievalQuery: query };
         const decision = await startActiveObservation("complement-selection", async selectionSpan => {
-          selectionSpan.update({ input: { question: state.question, missingConcepts: state.missingConcepts, currentEvidence, candidate } });
+          selectionSpan.update({ candidateRank: candidate.candidateRank, chunkIndex: candidate.chunkIndex, evidenceCount: currentEvidence.length });
           const verdict = await (dependencies.checkComplement ?? checkComplementSupport)(
             state.question, state.missingConcepts, currentEvidence, candidate);
-          selectionSpan.update({ output: { candidate, accepted: verdict.addsMissingSupport, reason: verdict.reason } });
+          selectionSpan.update({ accepted: verdict.addsMissingSupport });
           return verdict;
         });
         if (decision.addsMissingSupport) { selected = candidate; break; }
       }
       if (!selected) {
-        span.update({ output: { recovered: false, reason: "No candidate adds sufficient missing support." } });
+        span.update({ recovered: false });
         return { recoveryAttempted: true, supported: false, evidenceSet: [] };
       }
       const evidenceSet = [...currentEvidence, selected];
@@ -227,7 +194,7 @@ export function createWorkflowGraph(
       const answer = await dependencies.generateAnswer(state.question, evidence, context);
       if (!answer.trim()) throw new Error("Recovery generation returned an empty answer.");
       const verdict = await dependencies.verifyAnswer(state.question, answer, evidence, context);
-      span.update({ output: { query, evidenceSet, answer, verification: verdict } });
+      span.update({ recovered: verdict.supported, evidenceCount: evidenceSet.length });
       return { recoveryAttempted: true, evidenceSet, answer, supported: verdict.supported, reason: verdict.reason };
     });
   }
@@ -240,14 +207,7 @@ export function createWorkflowGraph(
       async (span) => {
         const nextCandidateIndex = state.candidateIndex + 1;
 
-        span.update({
-          input: {
-            currentCandidateRank: state.candidateIndex + 1
-          },
-          output: {
-            nextCandidateRank: nextCandidateIndex + 1
-          }
-        });
+        span.update({ currentCandidateRank: state.candidateIndex + 1, nextCandidateRank: nextCandidateIndex + 1 });
 
         return {
           candidateIndex: nextCandidateIndex,

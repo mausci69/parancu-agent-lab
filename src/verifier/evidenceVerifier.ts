@@ -1,6 +1,6 @@
 import { checkOpenAIContent, requestOpenAI } from "../../services/parancu-api/src/local/openaiRequest";
 import type { EvidenceContext } from "../workflow/state";
-import { startActiveObservation } from "@langfuse/tracing";
+import { startActiveObservation } from "../observability/langfuse";
 
 
 const OPENAI_MODEL =
@@ -28,7 +28,7 @@ function normalizeQuoteWhitespace(text: string): string {
 export function deriveEvidenceVerification(decision: VerifierDecision, evidence: string): EvidenceVerification {
   // Production callers reach this only after schema and credential-content validation.
   return startActiveObservation("verifier-decision", span => {
-    span.update({ input: { structuredVerdict: decision } });
+    span.update({ claimCount: decision.claims.length, missingConceptCount: decision.missingConcepts.length });
     // Exact substring matching after whitespace normalization; no fuzzy or semantic matching.
     const normalizedEvidence = normalizeQuoteWhitespace(evidence);
     const claims = decision.claims.map((claim, index) => {
@@ -51,7 +51,7 @@ export function deriveEvidenceVerification(decision: VerifierDecision, evidence:
       ...(decision.conceptConflation !== false ? ["concept_conflation"] : []),
       ...(decision.missingConcepts.length ? ["missing_concepts"] : [])
     ];
-    span.update({ output: { quoteChecks: claims, evidenceSupported, supported, failedChecks } });
+    span.update({ evidenceSupported, supported, failedCheckCount: failedChecks.length });
     return { supported, reason: decision.reason,
       ...(decision.missingConcepts.length ? { missingConcepts: decision.missingConcepts } : {}) };
   });

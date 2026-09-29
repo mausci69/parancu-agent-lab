@@ -1,18 +1,10 @@
-import { langfuseSdk } from "./langfuse";
-import { startActiveObservation } from "@langfuse/tracing";
+import { langfuseSdk, startActiveObservation } from "./langfuse";
 
 async function main() {
   await startActiveObservation(
     "parancu-langfuse-test",
     async (span) => {
-      span.update({
-        input: {
-          question: "What color is the Atlas prototype?"
-        },
-        output: {
-          answer: "The Atlas prototype is blue."
-        }
-      });
+      span.update({ candidateCount: 1, answered: true });
     }
   );
 }
@@ -20,10 +12,10 @@ async function main() {
 main()
   .then(async () => {
     await langfuseSdk.shutdown();
-    console.log("Langfuse test trace sent.");
+    console.log("Observability diagnostic completed; export requires PARANCU_OBSERVABILITY=true.");
   })
-  .catch(async (error) => {
-    console.error(error);
+  .catch(async () => {
+    console.error("Observability diagnostic failed.");
     await langfuseSdk.shutdown();
     process.exit(1);
   });

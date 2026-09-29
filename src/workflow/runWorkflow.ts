@@ -1,5 +1,5 @@
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
-import { startActiveObservation } from "@langfuse/tracing";
+import { startActiveObservation } from "../observability/langfuse";
 
 import { createWorkflowGraph, workflowGraph, type WorkflowDependencies } from "./graph";
 import type { WorkflowEvidence } from "./state";
@@ -36,12 +36,7 @@ export async function runWorkflow(
   return startActiveObservation(
     "parancu-workflow",
     async (span) => {
-      span.update({
-        input: {
-          question,
-          docId: corpus.docId
-        }
-      });
+      span.update({ chunkCount: corpus.chunks.length });
 
       const graph = dependencies
         ? createWorkflowGraph(dependencies)
@@ -87,9 +82,7 @@ export async function runWorkflow(
           }
         };
 
-        span.update({
-          output: result
-        });
+        span.update({ answered: true, candidateRank: result.candidateRank, chunkIndex: result.chunkIndex, evidenceCount: result.evidenceSet?.length ?? 1 });
 
         return result;
       }
@@ -99,9 +92,7 @@ export async function runWorkflow(
         question
       };
 
-      span.update({
-        output: result
-      });
+      span.update({ answered: false });
 
       return result;
     }

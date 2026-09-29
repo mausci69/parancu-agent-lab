@@ -39,7 +39,7 @@ Provide environment variables before launching:
 
 - `OPENAI_API_KEY` for corpus enrichment, generation and verification.
 - `OPENAI_MODEL` optionally overrides the generation/verifier model (code default: `gpt-5.4-mini`).
-- `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` for the Langfuse project.
+- Optional `PARANCU_OBSERVABILITY=true` plus Langfuse project credentials/endpoint for metadata-only tracing.
 
 From the repository root:
 
@@ -47,11 +47,87 @@ From the repository root:
 npm run workflow
 ```
 
-The entry point prepares a synthetic Atlas/Nova document, enriches it, asks a question and prints the result. It makes live OpenAI calls and uses local embeddings. It initializes the Langfuse SDK before loading the workflow and shuts the SDK down in a `finally` block, including on failure.
+The entry point prepares a synthetic Atlas/Nova document, enriches it, asks a question and prints the result. It makes live OpenAI calls and uses local embeddings. It enables metadata-only Langfuse tracing only with explicit observability opt-in and shuts an enabled SDK down in a `finally` block.
 
-## Tracing
+## Privacy-safe observability
 
-`src/observability/langfuse.ts` configures OpenTelemetry with a Langfuse span processor. The workflow records a parent `parancu-workflow` observation and `retrieve`, `generate`, `verify`, and `advance` observations. An optional `diagnostic-recovery` observation records the missing concepts, recovery query, evidence set, regenerated answer and verdict. Each eligible candidate check creates a nested `complement-selection` observation containing current evidence, candidate provenance, accepted/rejected status and reason. Full evidence and answers are recorded, as approved for synthetic laboratory data. Explicit model/token/cost generation metadata is not currently recorded. Corpus preparation is outside the workflow observation.
+Observability is **disabled by default** for the web application and laboratory
+runners. No Langfuse SDK or exporter is loaded or initialized while disabled,
+even if Langfuse credentials are present. Only the exact environment value
+`PARANCU_OBSERVABILITY=true` opts in; unset, `false`, `1`, and other values
+remain disabled. This decision is made at process startup; restart to change it.
+Missing credentials never affect disabled startup.
+
+To enable metadata-only observability, set these variables in the launching
+environment (the app does not load .env files):
+
+```text
+PARANCU_OBSERVABILITY=true
+LANGFUSE_PUBLIC_KEY=<your project public key>
+LANGFUSE_SECRET_KEY=<your project secret key>
+LANGFUSE_BASE_URL=<your Langfuse endpoint>
+```
+
+Both credentials must be nonblank when enabled. The endpoint defaults to
+`https://cloud.langfuse.com` if omitted or empty; the legacy `LANGFUSE_BASEURL`
+alias is not used. If initialization fails, the application continues with
+observability disabled and a fixed, content-free warning. There is no verbose
+content-tracing mode, including in development.
+
+Enabled traces contain fixed stage names (`parancu-workflow`, `retrieve`,
+`generate`, `verify`, `advance`, `diagnostic-recovery`, `complement-selection`,
+`verifier-decision`, and the manual diagnostic `parancu-langfuse-test`),
+timestamps/durations, SDK-generated trace/span IDs and parent relationships,
+and only these application metadata fields:
+
+- Nonnegative finite numbers: `chunkCount`, `candidateCount`, `candidateRank`,
+  `chunkIndex`, `currentCandidateRank`, `nextCandidateRank`,
+  `missingConceptCount`, `evidenceCount`, `claimCount`, `failedCheckCount`,
+  `durationMs`.
+- Booleans: `supported`, `evidenceSupported`, `accepted`, `recovered`,
+  `answered`, `failed`.
+
+The transport also supplies the fixed service name `parancu-agent-lab`, SDK
+name/language/version and instrumentation scope, span type/status/flags, a
+metadata-only marker, empty environment/release labels, and protocol bookkeeping.
+No original exception messages, stacks, or causes are sent. Failure is a boolean
+flag, not verifier prose. Token/cost accounting is not added here.
+
+Questions, document IDs, filenames, raw documents, evidence, answers, summaries,
+guiding questions, verifier reasons/claims/quotes, missing-concept text,
+credentials, and browser session IDs never enter observation updates. Langfuse
+project credentials are used only to authenticate requests to the configured
+Langfuse endpoint (HTTP authorization/public-key headers); they are not trace
+payloads. OpenAI keys are never passed to this transport. A second
+allowlist at the transport boundary rejects unknown/nested/text attributes.
+Manual span lifecycle management avoids automatic callback return/error capture.
+Only application-marked metadata spans are selected for export; HTTP, log, media,
+and automatic resource instrumentation are not enabled by this integration.
+Span creation ignores ambient OpenTelemetry/Langfuse context attributes and
+session baggage, retaining only the explicit application parent relationships.
+SDK console diagnostics are disabled even with debug environment settings;
+`LANGFUSE_RELEASE`, `LANGFUSE_TRACING_ENVIRONMENT`, `OTEL_SERVICE_NAME`, and
+`OTEL_RESOURCE_ATTRIBUTES` cannot add arbitrary labels or identifiers here.
+
+Console diagnostics remain metadata-only whether tracing is on or off:
+preparation chunk counts/indices, retrieval keyword/candidate counts and numeric
+scores, and existing E5 loading/tokenizer/model diagnostics. The public server
+uses sanitized operation-error messages. No environment switch enables content
+logging in the web path. Standalone CLI runners still print their deliberately
+requested results to the invoking terminal; these are not public server logs.
+
+Disabling observability does not disable the OpenAI calls explicitly requested
+with a session key. Key-free retrieval still runs locally on the application
+server and does not invoke the generation/verifier workflow.
+
+Privacy regression coverage is included in `npm run test:deterministic`: exact
+opt-in and SDK loading, metadata filtering, return/error privacy, successful and
+rejected recovery, unchanged workflow results, retrieval/preparation diagnostics,
+and the real Langfuse transport with an in-memory exporter (no Langfuse requests).
+Run deterministic checks with `PARANCU_OBSERVABILITY=false`, regardless of any
+credentials in your shell. The console regression exercises ranking with an
+empty query and empty-corpus enrichment to avoid E5 inference and OpenAI calls;
+it separately checks rejection of content-bearing diagnostic fields.
 
 ## Deterministic tests
 
@@ -104,7 +180,7 @@ There is no checkpoint/resume support: the enrichment function holds completed c
 
 Questions run sequentially through the existing `runWorkflow`. Each completed result is printed and saved under `data/results/question-answering/<timestamp-and-uuid>/<question-id>.json`, including its expected action for manual comparison. Expectations do not override actual model results or constitute automatic semantic grading. If a later question fails, earlier saved results remain; the error propagates and subsequent questions are not run. All generated corpora and results are under the already ignored `data/` directory.
 
-Both live modes initialize the existing Langfuse SDK before loading preparation/workflow modules and attempt shutdown in `finally`. A workflow failure remains the primary error if shutdown also fails; shutdown failure is reported separately. A shutdown-only failure propagates. Running questions exports full evidence and answers through the existing workflow instrumentation; preparation does not add new observations. Live execution sends real document content to OpenAI and, for workflow observations, Langfuse. Implementation/help/preflight validation does not perform these live operations.
+Both live modes use the optional metadata-only observability facade and attempt shutdown in `finally`. A workflow failure remains the primary error if shutdown also fails. Live OpenAI execution still processes document content, but optional Langfuse observations exclude it. Preparation does not add workflow observations. Implementation/help/preflight validation does not perform these live operations.
 
 ## Public runtime contract (deployment milestone 1)
 
@@ -177,8 +253,8 @@ For local development leave `WEB_PUBLIC_ORIGIN` unset and do not set
 127.0.0.1 Host headers with the actual port work, with matching origins required.
 Session keys and corpus ownership remain memory-only and are lost on process
 restart. No shared `OPENAI_API_KEY` is needed for the web app. Existing model and
-Langfuse environment settings remain unchanged. This milestone adds runtime and
-origin support only; privacy/telemetry, quotas, cleanup and operational milestones
+Langfuse credentials alone do not enable tracing; see the explicit opt-in above.
+Runtime/origin support and privacy-safe observability are implemented; quotas, cleanup and operational milestones
 remain prerequisites for the first public release.
 
 ## Local web application
@@ -201,10 +277,11 @@ Configure environment variables in the launching shell; this application does no
 | `OPENAI_API_KEY` | Ignored by the web app; used only by CLI workflows |
 | `EXPO_PUBLIC_OPENAI_MODEL` | Optional preparation model override; despite the inherited name, it is used only on the server here |
 | `OPENAI_MODEL` | Optional generation/verifier model override |
-| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` | Langfuse project credentials and endpoint |
+| `PARANCU_OBSERVABILITY` | Only `true` enables metadata-only observability; disabled by default |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` | Used only after explicit observability opt-in |
 | `WEB_PORT` | Optional local port, default `3000`; platform `PORT` takes precedence |
 
-The current code defaults both OpenAI model selections to `gpt-5.4-mini`. No keys are sent to the browser. Starting the web server does not prepare a document or ask questions; the existing tracing SDK initializes once for the server process. Upload/preparation and question submission trigger live OpenAI operations, and workflow traces contain full evidence and answers.
+The current code defaults both OpenAI model selections to `gpt-5.4-mini`. No keys are sent to the browser. Starting the web server does not prepare a document or ask questions; observability remains disabled unless explicitly enabled. TXT preparation and keyed questions trigger live OpenAI operations; optional workflow telemetry contains operational metadata only.
 
 ```sh
 npm run web:local
@@ -222,7 +299,7 @@ npm run web:local
 
 Preparation is sequential within a document; one preparation is allowed at a time, and overlapping questions for the same corpus receive a conflict response. Completed corpora are atomically published after enrichment. Failed jobs remain visible in memory and require explicit retry; there is no resume/checkpoint mechanism. A forced server stop loses unfinished preparation, and retry repeats completed metadata calls. Ctrl+C / SIGTERM stops accepting requests, waits for active requests and preparation, and shuts down Langfuse. A primary execution error is preserved if Langfuse shutdown also fails.
 
-The saved files are trusted local data; imported corpora also receive strict structural validation on reload. There is no corpus library/delete UI, conversation memory, token streaming or per-node live progress in this version. Question results are displayed in the browser and traced by the workflow, not saved as separate web result files. The generator/verifier prompts and retrieval logic are unchanged; only credential access and transport error sanitization are shared. The models still determine semantic grounding quality; model verification is not a proof. File contents are never silently refreshed from a changed source file.
+The saved files are trusted local data; imported corpora also receive strict structural validation on reload. There is no corpus library/delete UI, conversation memory, token streaming or per-node live progress in this version. Question results are displayed in the browser, not saved as separate web result files or exported in telemetry. The generator/verifier prompts and retrieval logic are unchanged; only credential access and transport error sanitization are shared. The models still determine semantic grounding quality; model verification is not a proof. File contents are never silently refreshed from a changed source file.
 
 ### Keys and corpus exchange
 
