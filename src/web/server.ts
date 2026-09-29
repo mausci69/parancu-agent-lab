@@ -210,7 +210,7 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
 }
 
 async function main(): Promise<void> {
-  const { port, host, publicOrigin } = readWebRuntimeConfig();
+  const { port, host, publicOrigin, corpusDirectory } = readWebRuntimeConfig();
   const resources = new WebResources(readWebLimits());
   // The shared facade loads an SDK only with explicit observability opt-in.
   const { langfuseSdk } = await import("../observability/langfuse.js");
@@ -222,7 +222,7 @@ async function main(): Promise<void> {
     const { enrichPreparedCorpusWithOpenAI } = await import("../../services/parancu-api/src/lib/gen/openaiPrepare.js");
     const { createWorkflowService } = await import("./workflowService.js");
     const root = path.resolve(__dirname, "../..");
-    store = new CorpusStore(path.join(root, "data/web/corpora"), {
+    store = new CorpusStore(corpusDirectory, {
       prepare: prepareCorpusLocal, enrich: enrichPreparedCorpusWithOpenAI
     }, console.error, KeyManager.checkContent, resources);
     server = createWebServer({ store, publicOrigin, ask: createWorkflowService(undefined, resources), webDirectory: path.join(root, "apps/web") });

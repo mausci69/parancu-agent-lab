@@ -285,12 +285,14 @@ test("HTTP validates bodies, origins, host and static allowlist before work", as
   assert.equal(calls, 0);
 });
 test("web runtime defaults, production configuration and port precedence", () => {
-  assert.deepEqual(readWebRuntimeConfig({}), { port: 3000, host: "127.0.0.1", publicOrigin: undefined });
+  assert.deepEqual(readWebRuntimeConfig({}), { port: 3000, host: "127.0.0.1", publicOrigin: undefined,
+    corpusDirectory: path.join(os.tmpdir(), "parancu-agent-lab", "corpora") });
   assert.equal(readWebRuntimeConfig({ WEB_PORT: "3001" }).port, 3001);
   assert.equal(readWebRuntimeConfig({ PORT: "8080", WEB_PORT: "3001" }).port, 8080);
   assert.equal(readWebRuntimeConfig({ PORT: "8080", WEB_PORT: "ignored" }).port, 8080);
   assert.deepEqual(readWebRuntimeConfig({ NODE_ENV: "production", WEB_PUBLIC_ORIGIN: "https://lab.example/",
-    WEB_HOST: "0.0.0.0", PORT: "8080" }), { port: 8080, host: "0.0.0.0", publicOrigin: "https://lab.example" });
+    WEB_HOST: "0.0.0.0", PORT: "8080" }), { port: 8080, host: "0.0.0.0", publicOrigin: "https://lab.example",
+    corpusDirectory: path.join(os.tmpdir(), "parancu-agent-lab", "corpora") });
   assert.throws(() => readWebRuntimeConfig({ NODE_ENV: "production" }), /WEB_PUBLIC_ORIGIN/);
   assert.throws(() => readWebRuntimeConfig({ WEB_HOST: "https://lab.example" }), /WEB_HOST/);
   for (const port of ["", "0", "65536", "1.5", "NaN", " 3000", "3e3"]) {
@@ -301,6 +303,17 @@ test("web runtime defaults, production configuration and port precedence", () =>
     "https://lab.example?x=1", "https://lab.example#fragment", "https://lab.example?", "https://lab.example/#",
     "https://lab.example/../", " https://lab.example"]) assert.throws(() => parsePublicOrigin(origin), /WEB_PUBLIC_ORIGIN/);
   assert.equal(parsePublicOrigin("https://lab.example:8443"), "https://lab.example:8443");
+});
+
+test("web corpus directory overrides resolve to absolute paths and reject blank values", () => {
+  for (const value of ["custom-corpora", path.join(os.tmpdir(), "custom-corpora")]) {
+    const { corpusDirectory } = readWebRuntimeConfig({ WEB_CORPUS_DIR: value });
+    assert.equal(corpusDirectory, path.resolve(value));
+    assert.equal(path.isAbsolute(corpusDirectory), true);
+  }
+  for (const value of ["", " ", "\t\n"]) {
+    assert.throws(() => readWebRuntimeConfig({ WEB_CORPUS_DIR: value }), /WEB_CORPUS_DIR/);
+  }
 });
 
 for (const publicOrigin of [undefined, "https://lab.example", "https://lab.example:8443"]) {

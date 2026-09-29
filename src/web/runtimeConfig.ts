@@ -1,4 +1,6 @@
 import { isIP } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 /** Only an explicitly configured HTTPS origin enables public mode. */
 export function parsePublicOrigin(value: string | undefined): string | undefined {
@@ -26,5 +28,11 @@ export function readWebRuntimeConfig(env: NodeJS.ProcessEnv = process.env) {
   if (host !== "localhost" && !isIP(host)) {
     throw new Error("WEB_HOST must be an IP address or localhost.");
   }
-  return { port, host, publicOrigin };
+  if (env.WEB_CORPUS_DIR !== undefined && !env.WEB_CORPUS_DIR.trim()) {
+    throw new Error("WEB_CORPUS_DIR must not be blank.");
+  }
+  const corpusDirectory = env.WEB_CORPUS_DIR === undefined
+    ? path.join(tmpdir(), "parancu-agent-lab", "corpora")
+    : path.resolve(env.WEB_CORPUS_DIR);
+  return { port, host, publicOrigin, corpusDirectory };
 }
