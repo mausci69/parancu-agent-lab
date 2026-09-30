@@ -7,6 +7,7 @@
   <title>ParancU — Document intelligence lab</title>
   <link rel="icon" type="image/png" href="/icon.png">
   <link rel="stylesheet" href="/styles.css">
+  <script src="/parancu-browser/client.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -46,7 +47,7 @@
         <p id="corpus-origin" class="corpus-origin" hidden></p>
         <div class="document-status" aria-live="polite"><span id="document-badge" class="badge">Waiting for a document</span><p id="document-status">Upload a document to get started.</p><button id="retry-status" class="text-button" hidden>Check status again</button></div>
         <div id="corpus-stats" class="corpus-stats" hidden><div><strong id="chunk-count">—</strong><span>CHUNK</span></div><div><strong id="sentence-count">—</strong><span>SENTENCES</span></div></div>
-        <div class="data-note"><span aria-hidden="true">ⓘ</span><p>Documents and prepared corpora are processed and stored temporarily on the Agent Lab server. TXT preparation and generated/verified answers use OpenAI only when a key is configured. Retrieval-only mode does not call OpenAI. Optional operational telemetry excludes document, question, answer, and evidence text.</p></div>
+        <div class="data-note"><span aria-hidden="true">ⓘ</span><p>Imported corpora stay in browser memory until you leave or reload. Their questions and evidence stay in your browser; retrieval uses no OpenAI. TXT documents are processed and stored temporarily on the server; preparation and generated/verified answers require an OpenAI key. Optional operational telemetry excludes document, question, answer, and evidence text.</p></div>
       </aside>
 
       <div class="research-panel">
@@ -86,7 +87,7 @@
       <p id="key-help" class="settings-help">Your key is held only in server memory. It is never saved to disk or browser storage. Closing this dialog clears the input field. Readiness means a key is configured; it does not test your account.</p>
       <div id="settings-error" class="error-notice" role="alert" hidden></div>
       <div class="settings-actions"><button id="save-key" class="button primary" type="submit">Use key</button><button id="remove-key" class="button secondary" type="button">Remove key</button></div>
-      <p class="settings-help">Only the key you enter here is used. Removing the key disables TXT preparation and switches questions to server-side ParancU retrieval without OpenAI. Import and export remain available. Requests already sent may still finish. Stopping the server clears the session key.</p>
+      <p class="settings-help">Only the key you enter here is used. Removing the key disables TXT preparation and switches TXT corpus questions to server-side retrieval without OpenAI. Imported corpora always use browser retrieval; Generate/Verify is unavailable for them in this version. Requests already sent may still finish. Stopping the server clears the session key.</p>
     </form>
   </dialog>
 </body>

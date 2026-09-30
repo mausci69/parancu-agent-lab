@@ -1,5 +1,5 @@
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
-import { assertNoCredentials } from "../../services/parancu-api/src/local/openaiKeyStore";
+import { assertNoCredentials } from "../../services/parancu-api/src/local/credentialContent";
 
 export const EMBEDDING_MODEL = "multilingual-e5-small";
 export const EMBEDDING_DIMENSIONS = 384;

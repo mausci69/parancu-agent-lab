@@ -14,9 +14,4 @@ export async function loadOpenAIKey(): Promise<string | null> {
   return key || null;
 }
 
-export function assertNoCredentials(text: string, keys: Array<string | null | undefined> = []): void {
-  if (/sk-[A-Za-z0-9_-]{16,}/.test(text) ||
-      keys.some(key => key && text.includes(key))) {
-    throw new Error("Credentials must not appear in document content or model output.");
-  }
-}
+export { assertNoCredentials } from "./credentialContent.js";

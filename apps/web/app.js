@@ -3,6 +3,14 @@
 const byId = id => document.getElementById(id);
 const storageKey = "parancu.web.corpusId";
 let corpus = null;
+let browserCorpus = null;
+let browserExportUrl = null;
+const isBrowserCorpus = () => corpus?.owner === "browser";
+function clearBrowserCorpus() {
+  browserCorpus = null;
+  if (browserExportUrl) URL.revokeObjectURL(browserExportUrl);
+  browserExportUrl = null;
+}
 let file = null;
 let preparingRequest = false;
 let asking = false;
@@ -18,7 +26,7 @@ function showKeyStatus(status) {
   byId("key-status").className = status.ready ? "badge ready" : "badge";
   byId("settings-status").textContent = status.source === "session"
     ? "Ready · using a session key."
-    : "Add a key for TXT preparation and verified answers. Server-side ParancU retrieval without OpenAI, import and export work without a key.";
+    : "Add a key for TXT preparation and verified answers. Imported corpora use browser retrieval without OpenAI or a key.";
   byId("remove-key").disabled = settingsBusy || status.source !== "session";
   controls();
 }
@@ -43,6 +51,20 @@ byId("settings").addEventListener("click", () => {
 byId("close-settings").addEventListener("click", () => byId("settings-dialog").close());
 byId("settings-dialog").addEventListener("close", () => { byId("openai-key").value = ""; });
 window.addEventListener("pagehide", () => { byId("openai-key").value = ""; });
+window.addEventListener("pagehide", () => {
+  if (!isBrowserCorpus()) return;
+  clearBrowserCorpus(); corpus = null; file = null; ++pollVersion;
+  byId("document-file").value = "";
+  byId("question").value = "";
+  byId("asked-question").textContent = "";
+  byId("answer-text").textContent = "";
+  byId("selected-file").hidden = true;
+  byId("corpus-stats").hidden = true;
+  byId("corpus-origin").hidden = true;
+  byId("export-corpus").hidden = true;
+  byId("document-status").textContent = "Import the corpus again to retrieve in this browser.";
+  resetAnswer(); controls();
+});
 window.addEventListener("focus", () => { void refreshKeyStatus(); });
 
 async function updateKey(remove) {
@@ -90,6 +112,7 @@ function selectMode(next) {
   if (next === mode) return;
   if (preparingRequest || asking || corpus?.status === "preparing") return;
   mode = next;
+  clearBrowserCorpus();
   file = null; corpus = null; ++pollVersion;
   remember(null);
   byId("document-file").value = "";
@@ -137,19 +160,21 @@ function controls() {
   const canAsk = corpus?.status === "ready" && !asking;
   byId("question").disabled = !canAsk;
   byId("ask").disabled = !canAsk;
-  byId("ask").textContent = keyState.ready ? (asking ? "Finding an answer…" : "Find an answer →") : (asking ? "Retrieving evidence…" : "Find evidence →");
-  byId("question-hint").textContent = !keyState.ready ? "Retrieval-only mode: server-side ParancU retrieval without OpenAI. No answer is generated or verified." : corpus?.status === "ready"
+  byId("ask").textContent = keyState.ready && !isBrowserCorpus() ? (asking ? "Finding an answer…" : "Find an answer →") : (asking ? "Retrieving evidence…" : "Find evidence →");
+  byId("question-hint").textContent = isBrowserCorpus() ? "Browser retrieval only. Questions and evidence stay on-device. Generate/Verify is unavailable for imported corpora." : !keyState.ready ? "Retrieval-only mode: server-side ParancU retrieval without OpenAI. No answer is generated or verified." : corpus?.status === "ready"
     ? "A specific question helps find the right evidence."
     : "You can ask a question once preparation is complete.";
   if (corpus?.status === "ready") {
-    byId("document-status").textContent = keyState.ready
+    byId("document-status").textContent = isBrowserCorpus()
+      ? "Corpus loaded in browser memory. Retrieval-only mode; export is available. Reloading clears this corpus."
+      : keyState.ready
       ? "Corpus loaded and ready. Ask questions without preparing it again."
       : "Corpus loaded and ready. Export is available. Retrieval-only mode: server-side ParancU retrieval without OpenAI. No answer is generated or verified.";
   }
 }
 
 function pipeline(mode) {
-  const retrievalOnly = mode === "retrieved" || (mode === "asking" && !keyState.ready);
+  const retrievalOnly = mode === "retrieved" || (mode === "asking" && (!keyState.ready || isBrowserCorpus()));
   ["document", "retrieve", "generate", "verify"].forEach((name, index) => {
     const node = byId(`step-${name}`);
     node.className = "";
@@ -179,9 +204,13 @@ function showCorpus(info) {
   byId("export-corpus").hidden = !ready;
   byId("corpus-origin").hidden = !ready;
   if (ready) {
-    byId("export-corpus").href = `/api/corpora/${encodeURIComponent(info.id)}/export`;
+    byId("export-corpus").href = isBrowserCorpus() ? browserExportUrl : `/api/corpora/${encodeURIComponent(info.id)}/export`;
     byId("export-corpus").setAttribute("download", "");
     byId("corpus-origin").textContent = info.origin === "imported" ? "Imported prepared corpus · ready to use" : "Created from TXT";
+    if (isBrowserCorpus()) {
+      byId("export-corpus").setAttribute("download", ParancUBrowser.exportFilename(browserCorpus.sourceFilename));
+      byId("corpus-origin").textContent = "Imported prepared corpus · browser memory only";
+    }
   }
   if (ready) {
     byId("chunk-count").textContent = String(info.chunks);
@@ -229,6 +258,7 @@ byId("document-file").addEventListener("change", () => {
     return;
   }
   file = selected;
+  clearBrowserCorpus();
   corpus = null;
   ++pollVersion;
   remember(null);
@@ -258,14 +288,24 @@ byId("prepare").addEventListener("click", async () => {
   errorMessage("");
   try {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
-    let saved;
     if (mode === "import") {
-      try { saved = JSON.parse(text); }
-      catch { throw new Error("Invalid JSON. Choose a complete ParancU prepared-corpus file."); }
+      if (!globalThis.ParancUBrowser) throw new Error("Browser retrieval module unavailable. Reload the page.");
+      const payload = ParancUBrowser.importPrepared(text, file.name, byId("language").value);
+      clearBrowserCorpus();
+      browserCorpus = payload;
+      browserExportUrl = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+      remember(null);
+      ++pollVersion;
+      showCorpus({ owner: "browser", origin: "imported", status: "ready", name: payload.sourceFilename,
+        language: payload.language, chunks: payload.corpus.chunks.length, sentences: payload.corpus.sentences.length });
+      file = null;
+      byId("document-file").value = "";
+      byId("question").focus();
+      return;
     }
-    const info = await api(mode === "import" ? "/api/corpora/import" : "/api/corpora", {
+    const info = await api("/api/corpora", {
       method: "POST", body: JSON.stringify({ name: file.name, language: byId("language").value,
-        ...(mode === "import" ? { corpus: saved } : { text }) })
+        text })
     });
     remember(info.id);
     showCorpus(info);
@@ -290,7 +330,7 @@ function showAnswer(data) {
   byId("asked-question").textContent = result.question;
   byId("answer-badge").textContent = retrievalOnly ? "RETRIEVAL ONLY" : result.action === "answer" ? "SUPPORT VERIFIED" : "INSUFFICIENT EVIDENCE";
   byId("answer-badge").className = result.action === "answer" ? "badge ready" : "badge";
-  byId("answer-text").textContent = retrievalOnly ? "Server-side ParancU retrieval without OpenAI. No answer was generated or verified. Review the retrieved passages below." : result.action === "answer" ? result.answer : "No answer was supported by the passages checked. Try rephrasing your question or using another document.";
+  byId("answer-text").textContent = retrievalOnly ? `${isBrowserCorpus() ? "Browser" : "Server-side"} ParancU retrieval without OpenAI. No answer was generated or verified. Review the retrieved passages below.` : result.action === "answer" ? result.answer : "No answer was supported by the passages checked. Try rephrasing your question or using another document.";
   if (result.action === "answer") {
     const evidenceSet = result.evidenceSet || [result.evidence];
     const evidence = evidenceSet[0];
@@ -340,9 +380,13 @@ byId("question-form").addEventListener("submit", async event => {
   byId("answer-placeholder").hidden = true;
   byId("answer-panel").setAttribute("aria-busy", "true");
   byId("activity").hidden = false;
-  byId("activity").textContent = keyState.ready ? "Retrieving evidence, generating an answer, and verifying support…" : "Running server-side ParancU retrieval without OpenAI…";
+  byId("activity").textContent = isBrowserCorpus() ? "Running browser retrieval; the first question loads the E5 model (~129 MiB including tokenizer)…" : keyState.ready ? "Retrieving evidence, generating an answer, and verifying support…" : "Running server-side ParancU retrieval without OpenAI…";
   try {
-    const data = await api("/api/questions", { method: "POST", body: JSON.stringify({ corpusId: corpus.id, question }) });
+    const activeCorpus = corpus;
+    const data = isBrowserCorpus()
+      ? await ParancUBrowser.retrieve(question, browserCorpus)
+      : await api("/api/questions", { method: "POST", body: JSON.stringify({ corpusId: corpus.id, question }) });
+    if (activeCorpus !== corpus) return;
     showAnswer(data);
     pipeline(data.result.action === "retrieval_only" ? "retrieved" : "complete");
   } catch (error) {

@@ -9,6 +9,7 @@ import { SessionManager } from "./sessionManager";
 import { exportFilename } from "./corpusFormat";
 import { parsePublicOrigin, readWebRuntimeConfig, readWebShutdownTimeout, validateCorpusDirectory } from "./runtimeConfig";
 import { readWebLimits, WebResources, QUESTION_REQUEST_BYTES, TXT_ENVELOPE_BYTES } from "./resourceLimits";
+import { serveBrowserAsset } from "./browserAssets";
 
 type ServerOptions = {
   store: CorpusStore;
@@ -64,7 +65,7 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("Referrer-Policy", "no-referrer");
-    response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
     const send = (status: number, data: unknown) => {
       response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
       response.end(JSON.stringify(data));
@@ -99,6 +100,7 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
         response.end(content);
         return;
       }
+      if (request.method === "GET" && await serveBrowserAsset(url.pathname, response)) return;
       if (draining) throw new WebError(503, "Service temporarily unavailable.");
       const exportMatch = /^\/api\/corpora\/([^/]+)\/export$/.exec(url.pathname);
       const corpusMatch = /^\/api\/corpora\/([^/]+)$/.exec(url.pathname);

@@ -23,6 +23,8 @@ import { requestOpenAI } from "../../services/parancu-api/src/local/openaiReques
 import { generateResponse } from "../responder/responseAgent";
 import { verifyEvidence } from "../verifier/evidenceVerifier";
 import { AdmissionGate, DEFAULT_WEB_LIMITS, readWebLimits, WebResources } from "./resourceLimits";
+import { build } from "esbuild";
+import { browserBuildOptions, browserBundle } from "./browserAssets";
 
 const statusIs = (status: number) => (error: unknown) => error instanceof WebError && error.status === status;
 
@@ -1300,11 +1302,14 @@ test("UI imports without a key and preserves the visible corpus across active-ta
   }
   const node = (id: string) => { assert.ok(nodes.has(id), `HTML element ${id} exists`); return nodes.get(id); };
   const storage = new Map<string, string>();
+  const blobs = new Map<string, Blob>();
   const requests: string[] = [];
   let delayedStatus: { captured: ReturnType<typeof deferred>; release: ReturnType<typeof deferred>; done: ReturnType<typeof deferred> } | undefined;
   const context = vm.createContext({
     document: { getElementById: (id: string) => nodes.get(id) ?? null },
-    window: { addEventListener() {} }, TextDecoder,
+    window: { addEventListener() {} }, TextDecoder, TextEncoder, Blob,
+    URL: { createObjectURL: (blob: Blob) => { blobs.set("blob:browser-corpus", blob); return "blob:browser-corpus"; },
+      revokeObjectURL: (url: string) => blobs.delete(url) },
     localStorage: { getItem: (key: string) => storage.get(key) ?? null,
       setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
     fetch: async (url: string, options?: RequestInit) => {
@@ -1318,6 +1323,7 @@ test("UI imports without a key and preserves the visible corpus across active-ta
       return { ok: response.ok, json: async () => { delay.done.resolve(); return data; } };
     }
   });
+  vm.runInContext(new TextDecoder().decode(await browserBundle()), context);
   vm.runInContext(await readFile(path.join(webDirectory, "app.js"), "utf8"), context);
   await vm.runInContext("refreshKeyStatus()", context);
   assert.equal(node("key-status").textContent, "OpenAI key missing");
@@ -1333,12 +1339,9 @@ test("UI imports without a key and preserves the visible corpus across active-ta
   node("document-file").fire("change");
   assert.equal(node("prepare").disabled, false, "local import needs no key");
   await node("prepare").fire("click");
-  const id = storage.get("parancu.web.corpusId");
-  assert.ok(id);
-  await vm.runInContext(`poll(${JSON.stringify(id)}, pollVersion)`, context);
   const assertLoaded = () => {
-    assert.equal(vm.runInContext("corpus.id", context), id);
-    assert.equal(storage.get("parancu.web.corpusId"), id);
+    assert.equal(vm.runInContext("corpus.owner", context), "browser");
+    assert.equal(storage.size, 0, "browser corpus never enters storage");
     assert.equal(node("selected-file").hidden, false);
     assert.equal(node("file-name").textContent, "Atlas.txt");
     assert.equal(node("document-badge").textContent, "Document ready");
@@ -1348,7 +1351,7 @@ test("UI imports without a key and preserves the visible corpus across active-ta
     assert.equal(node("corpus-origin").hidden, false);
     assert.match(node("corpus-origin").textContent, /Imported/);
     assert.equal(node("export-corpus").hidden, false);
-    assert.equal(node("export-corpus").href, `/api/corpora/${id}/export`);
+    assert.equal(node("export-corpus").href, "blob:browser-corpus");
     assert.equal(node("error").hidden, true);
   };
   assertLoaded();
@@ -1357,7 +1360,7 @@ test("UI imports without a key and preserves the visible corpus across active-ta
   assert.match(node("document-status").textContent, /loaded.*Retrieval-only/);
   assert.equal(node("question").disabled, false);
   assert.equal(node("ask").disabled, false);
-  assert.equal((await fetch(base + node("export-corpus").href)).status, 200);
+  assert.deepEqual(JSON.parse(await blobs.get(node("export-corpus").href)!.text()).corpus, enriched());
   const finishSettings = async () => {
     for (let attempt = 0; attempt < 200; attempt++) {
       if (!vm.runInContext("settingsBusy", context)) return;
@@ -1395,17 +1398,185 @@ test("UI imports without a key and preserves the visible corpus across active-ta
   assertLoaded();
   assert.equal(node("question").disabled, false);
   assert.equal(node("ask").disabled, false);
-  assert.equal(requests.filter(r => r === "POST /api/corpora/import").length, 1);
+  assert.equal(requests.filter(r => r === "POST /api/corpora/import").length, 0);
+  assert.ok(requests.every(r => r.includes("/api/settings/openai")), "only independent Settings calls reach the server");
   assert.ok(!requests.includes("POST /api/corpora"));
   assert.ok(!requests.includes("POST /api/questions"));
   // Switching explicitly to a new TXT verifies its independent credential gate.
   node("mode-txt").fire("click");
+  assert.equal(blobs.size, 0, "switching corpus releases the export Blob");
   node("document-file").files = [{ name: "example.txt", size: 10 }];
   node("document-file").fire("change");
   assert.equal(node("prepare").disabled, false);
   node("remove-key").fire("click");
   await finishSettings();
   assert.equal(node("prepare").disabled, true);
+});
+
+test("browser corpus validation preserves the server format and rejects malformed imports", async () => {
+  const context = vm.createContext({ TextEncoder });
+  vm.runInContext(new TextDecoder().decode(await browserBundle()), context);
+  const browser = context.ParancUBrowser;
+  const legacy = enriched();
+  const payload = browser.importPrepared(JSON.stringify(legacy), "Atlas.prepared.json", "it");
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.corpus)), legacy);
+  assert.equal(payload.language, "it");
+  assert.equal(payload.sourceFilename, "Atlas.txt");
+  assert.deepEqual(JSON.parse(JSON.stringify(browser.importPrepared(JSON.stringify(payload), "ignored.json", "en"))),
+    JSON.parse(JSON.stringify(payload)), "versioned exports retain their metadata and vectors");
+  for (const mutate of [
+    (c: any) => { c.chunks[0].guiding_question_embedding.pop(); },
+    (c: any) => { c.chunks[0].sentence_ids = [999]; },
+    (c: any) => { c.chunks[0].text = "different text"; },
+    (c: any) => { c.secret = "unknown field"; },
+    (c: any) => { c.chunks[0].guiding_question_embedding.fill(0); },
+    (c: any) => { c.chunks[0].summary = sessionKey; }
+  ]) {
+    const value = enriched(); mutate(value);
+    assert.throws(() => browser.importPrepared(JSON.stringify(value), "a.json", "en"));
+  }
+  assert.throws(() => browser.importPrepared("{", "a.json", "en"), /Invalid JSON/);
+  assert.throws(() => browser.importPrepared(" ".repeat(32 * 1024 * 1024 + 1), "a.json", "en"), /32 MiB/);
+  assert.throws(() => browser.importPrepared(JSON.stringify({ chunks: Array(257).fill({}) }), "a.json", "en"), /256 chunk/);
+});
+
+async function deterministicBrowserClient() {
+  const options = browserBuildOptions();
+  // Only replace E5 inference, never the scorer or corpus validator.
+  options.plugins!.push({ name: "fixed-query-vector", setup(builder) {
+    builder.onLoad({ filter: /[/\\]browser[/\\]e5\.ts$/ }, () => ({
+      contents: "export async function embedOne() { return Array.from({length:384}, (_, i) => i === 0 ? 1 : 0); }",
+      loader: "ts"
+    }));
+  } });
+  const compiled = await build(options);
+  const context = vm.createContext({ TextEncoder, console: { log: noLog } });
+  vm.runInContext(compiled.outputFiles![0].text, context);
+  return { browser: context.ParancUBrowser, options };
+}
+
+test("browser retrieval uses the unchanged production scorer, default weights, indices and Top-5 ordering", async () => {
+  const { browser, options } = await deterministicBrowserClient();
+  const referenceBuild = await build({ ...options,
+    entryPoints: [path.resolve(__dirname, "../../services/parancu-api/src/local/retrieval.ts")], globalName: "Reference" });
+  const referenceContext = vm.createContext({ console: { log: noLog } });
+  vm.runInContext(referenceBuild.outputFiles![0].text, referenceContext);
+  let offset = 0;
+  const sentences = ["LUNAR chemistry.", "LUNAR rocks.", "chemistry minerals.", "Other topic.",
+    "Other topic.", "Other topic.", "Other topic."].map((text, id) => {
+    const s = { id, text, start: offset, end: offset + text.length }; offset = s.end + 1; return s;
+  });
+  const fixture = { docId: "rank-fixture", sentences, chunks: sentences.map(s => ({
+    id: s.id, startSentence: s.id, endSentence: s.id + 1, sentence_ids: [s.id], text: s.text,
+    summary: s.text, guiding_question: s.text, answer_focus: "compatibility only",
+    guiding_question_embedding: Array.from({ length: 384 }, (_, i) => i === (s.id === 1 ? 1 : 0) ? (s.id === 6 ? -1 : 1) : 0),
+    answer_focus_embedding: Array.from({ length: 384 }, (_, i) => i === 1 ? 1 : 0)
+  })) };
+  const payload = browser.importPrepared(JSON.stringify(fixture), "fixture.json", "en");
+  for (const question of ["LUNAR", "minerals", "What topic is described?"]) {
+    const expected = await referenceContext.Reference.retrieveCandidatesFromPrepared(question, fixture, 5);
+    const actual = await browser.retrieve(question, payload);
+    assert.equal(actual.result.action, "retrieval_only");
+    assert.deepEqual(JSON.parse(JSON.stringify(actual.retrievedEvidence)), JSON.parse(JSON.stringify(expected.map((c: RetrieveResult, i: number) => ({
+      chunkIndex: c.chunk_index, text: c.chunk, summary: c.summary, candidateRank: i + 1, score: c.score, status: "not_evaluated"
+    })))));
+    assert.equal(actual.retrievedEvidence.length, 5);
+  }
+  const semanticOnly = await browser.retrieve("What topic is described?", payload);
+  assert.deepEqual(Array.from(semanticOnly.retrievedEvidence, (c: any) => c.chunkIndex), [0, 2, 3, 4, 5], "stable ties preserve original indices");
+  assert.ok(semanticOnly.retrievedEvidence.every((c: any) => c.score === 0.65));
+  const anchors = await browser.retrieve("LUNAR", payload);
+  assert.equal(anchors.retrievedEvidence[0].score, 0.999, "public retrieval scores preserve the production 0.999 cap");
+  const rare = await browser.retrieve("minerals", payload);
+  assert.equal(rare.retrievedEvidence[0].chunkIndex, 2);
+  assert.equal(rare.retrievedEvidence[0].score, 0.65 + (1 - 0.65) / 3, "rare lowercase evidence uses the one-third component");
+});
+
+test("browser-owned import, question and export stay in memory even with an OpenAI key; reload clears them", async () => {
+  const { browser } = await deterministicBrowserClient();
+  const script = await readFile(path.join(webDirectory, "app.js"), "utf8");
+  const requests: string[] = [];
+  const stored = new Map<string, string>();
+  const blobs = new Map<string, Blob>();
+  const makePage = () => {
+    const nodes = new Map<string, any>();
+    const makeNode = () => ({ value: "", files: [] as any[], textContent: "", hidden: false, disabled: false, className: "",
+      children: [] as any[], listeners: new Map<string, any>(), attributes: new Map<string, string>(),
+      classList: { toggle() {}, add() {} }, focus() {},
+      setAttribute(key: string, value: string) { this.attributes.set(key, value); },
+      append(...items: any[]) { this.children.push(...items); }, replaceChildren() { this.children = []; },
+      addEventListener(name: string, listener: any) { this.listeners.set(name, listener); }
+    });
+    const node = (id: string) => { if (!nodes.has(id)) nodes.set(id, makeNode()); return nodes.get(id); };
+    node("language").value = "en";
+    const lifecycle = new Map<string, Array<() => void>>();
+    const context = vm.createContext({ ParancUBrowser: browser, TextDecoder, Blob,
+      URL: { createObjectURL: (blob: Blob) => { blobs.set("blob:private", blob); return "blob:private"; },
+        revokeObjectURL: (url: string) => blobs.delete(url) },
+      document: { getElementById: node, createElement: makeNode },
+      window: { addEventListener(name: string, fn: () => void) { lifecycle.set(name, [...(lifecycle.get(name) ?? []), fn]); } },
+      localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+        setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
+      fetch: async (url: string) => {
+        requests.push(url);
+        assert.equal(url, "/api/settings/openai", "no corpus/question/evidence API is permitted");
+        return { ok: true, json: async () => ({ ready: true, source: "session" }) };
+      }
+    });
+    vm.runInContext(script, context);
+    return { context, node, lifecycle };
+  };
+  const first = makePage();
+  await vm.runInContext("refreshKeyStatus()", first.context);
+  const fire = (id: string, event: string) => first.node(id).listeners.get(event)({ preventDefault() {} });
+  fire("mode-import", "click");
+  const bytes = Buffer.from(JSON.stringify(enriched()));
+  first.node("document-file").files = [{ name: "private.json", size: bytes.length, arrayBuffer: async () => bytes }];
+  fire("document-file", "change");
+  await fire("prepare", "click");
+  assert.equal(vm.runInContext("corpus.owner", first.context), "browser");
+  assert.equal(stored.size, 0);
+  assert.equal(first.node("ask").textContent, "Find evidence →");
+  assert.match(first.node("question-hint").textContent, /Generate\/Verify is unavailable/);
+  assert.equal(first.node("export-corpus").href, "blob:private");
+  const exported = JSON.parse(await blobs.get("blob:private")!.text());
+  assert.deepEqual(exported.corpus, enriched());
+  assert.equal(exported.formatVersion, 1);
+  const before = requests.length;
+  first.node("question").value = "What color is Atlas?";
+  await fire("question-form", "submit");
+  assert.equal(requests.length, before, "asking imported-corpus questions makes no network request");
+  assert.equal(first.node("answer-badge").textContent, "RETRIEVAL ONLY");
+  assert.match(first.node("answer-text").textContent, /Browser ParancU/);
+  assert.ok(first.node("evidence-list").children.length > 0);
+  assert.equal(first.node("step-generate").className, "");
+  assert.equal(first.node("step-verify").className, "");
+  assert.equal(stored.size, 0);
+  first.lifecycle.get("pagehide")!.forEach(fn => fn());
+  assert.equal(blobs.size, 0);
+  assert.equal(vm.runInContext("browserCorpus", first.context), null);
+  const second = makePage();
+  await vm.runInContext("refreshKeyStatus()", second.context);
+  assert.equal(vm.runInContext("corpus", second.context), null);
+  assert.equal(second.node("ask").disabled, true);
+  assert.ok(requests.every(url => url === "/api/settings/openai"));
+});
+
+test("browser runtime assets retain Host/origin checks and do not resolve sessions", async t => {
+  const store = new CorpusStore(await tempDirectory(t), { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const sessions = new SessionManager();
+  const base = await startServer(t, store, service(), new KeyManager(), [], sessions);
+  const resolve = t.mock.method(sessions, "resolve", () => assert.fail("public assets allocated a session"));
+  const response = await globalThis.fetch(base + "/parancu-browser/client.js");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("set-cookie"), null);
+  assert.match(response.headers.get("content-security-policy")!, /'wasm-unsafe-eval'/);
+  assert.doesNotMatch(response.headers.get("content-security-policy")!, /'unsafe-eval'/);
+  assert.match(await response.text(), /ParancUBrowser/);
+  assert.equal((await globalThis.fetch(base + "/parancu-browser/client.js", { headers: { Origin: "https://other.example" } })).status, 403);
+  assert.equal((await globalThis.fetch(base + "/parancu-browser/ort/package.json")).status, 404);
+  assert.equal((await globalThis.fetch(base + "/parancu-browser/e5/private.json")).status, 404);
+  assert.equal(resolve.mock.callCount(), 0);
 });
 
 test("Settings UI reflects server key state, clears input, closes on Use key, and switches to local retrieval after removal", async t => {
