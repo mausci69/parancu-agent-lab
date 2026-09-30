@@ -1,5 +1,5 @@
 import type { PrepareResult } from "../../services/parancu-api/src/local/prepareCorpus";
-import { retrieveCandidatesFromPrepared, type RetrieveResult } from "../../services/parancu-api/src/local/retrieval";
+import { retrieveCandidatesFromPrepared, type RetrieveResult } from "../../services/parancu-api/src/local/retrieval.js";
 import type { WorkflowDependencies } from "../workflow/graph";
 import { runWorkflow, type WorkflowResult } from "../workflow/runWorkflow";
 import { generateResponse } from "../responder/responseAgent";
