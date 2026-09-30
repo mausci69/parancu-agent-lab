@@ -240,11 +240,21 @@ test("HTTP no_evidence is a successful search outcome with rejected candidates",
   assert.equal(body.retrievedEvidence.length, 3);
 });
 
-test("exported E5 initializer shares lazy initialization without running inference", async t => {
+test("distinct E5 module identities share initialization and the initialized embedding session", async t => {
+  const stateKey = Symbol.for("parancu-agent-lab.e5.state");
+  const globals = globalThis as typeof globalThis & { [stateKey]?: unknown };
+  const previousState = Object.getOwnPropertyDescriptor(globals, stateKey);
+  delete globals[stateKey];
+  t.after(() => {
+    if (previousState) Object.defineProperty(globals, stateKey, previousState);
+    else delete globals[stateKey];
+  });
   const filename = path.resolve(__dirname, "../../services/parancu-api/src/lib/embeddings.ts");
   const loader = register({ namespace: "e5-initializer-test" });
-  t.after(() => loader.unregister());
+  const otherLoader = register({ namespace: "e5-retrieval-test" });
+  t.after(() => { otherLoader.unregister(); loader.unregister(); });
   let loads = 0;
+  let tokenizers = 0;
   let runs = 0;
   let available = false;
   const gate = deferred();
@@ -253,6 +263,7 @@ test("exported E5 initializer shares lazy initialization without running inferen
     if (!this.filename.startsWith(filename)) return originalRequire.call(this, name);
     if (name === "node:fs") return { existsSync: () => available, readFileSync: () => "{}" };
     if (name === "@huggingface/tokenizers") return { Tokenizer: class {
+      constructor() { tokenizers++; }
       encode() { return { ids: [0, 2] }; }
     } };
     if (name === "onnxruntime-node") return {
@@ -269,24 +280,34 @@ test("exported E5 initializer shares lazy initialization without running inferen
     return originalRequire.call(this, name);
   });
   let exports: typeof import("../../services/parancu-api/src/lib/embeddings");
-  try { exports = loader.require(filename, __filename); }
+  let otherExports: typeof exports;
+  try {
+    exports = loader.require(filename, __filename);
+    otherExports = otherLoader.require(filename, __filename);
+  }
   finally { mockedRequire.mock.restore(); }
+  assert.notEqual(exports.initializeE5, otherExports.initializeE5, "separate module evaluations are required");
   t.mock.method(console, "log", noLog);
   await assert.rejects(exports.initializeE5(), /E5 model not found/);
   available = true;
   const first = exports.initializeE5();
-  const second = exports.initializeE5();
+  const sharedState = globals[stateKey] as { loading: Promise<void> };
+  const loading = sharedState.loading;
+  const second = otherExports.initializeE5();
+  assert.equal(sharedState.loading, loading);
   assert.equal(loads, 1);
+  assert.equal(tokenizers, 1);
   gate.resolve();
   await Promise.all([first, second]);
-  await exports.initializeE5();
+  await otherExports.initializeE5();
   assert.equal(loads, 1);
   assert.equal(runs, 0);
   assert.deepEqual(Array.from(await exports.embedMany([])), []);
-  assert.deepEqual(Array.from(await exports.embedOne("query")), Array(384).fill(0.5));
+  assert.deepEqual(Array.from(await otherExports.embedOne("query")), Array(384).fill(0.5));
   const passages = await exports.embedMany(["passage"]);
   assert.deepEqual(Array.from(passages[0]), Array(384).fill(0.5));
   assert.equal(loads, 1);
+  assert.equal(tokenizers, 1);
   assert.equal(runs, 2);
 });
 

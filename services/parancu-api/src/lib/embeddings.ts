@@ -44,9 +44,18 @@ const TOKENIZER_CONFIG_PATH = path.join(
   "tokenizer_config.json"
 );
 
-let tokenizer: Tokenizer | null = null;
-let embeddingSession: ort.InferenceSession | null = null;
-let loading: Promise<void> | null = null;
+type E5State = {
+  tokenizer: Tokenizer | null;
+  embeddingSession: ort.InferenceSession | null;
+  loading: Promise<void> | null;
+};
+// ESM and tsx's CommonJS loader can evaluate this file under different identities.
+// Share the model objects and initialization lock across all evaluations.
+const stateKey = Symbol.for("parancu-agent-lab.e5.state");
+const processGlobal = globalThis as typeof globalThis & { [stateKey]?: E5State };
+const state: E5State = processGlobal[stateKey] ??= {
+  tokenizer: null, embeddingSession: null, loading: null
+};
 
 function readJson(filePath: string): any {
   return JSON.parse(
@@ -55,15 +64,15 @@ function readJson(filePath: string): any {
 }
 
 async function ensureModels(): Promise<void> {
-  if (tokenizer && embeddingSession) {
+  if (state.tokenizer && state.embeddingSession) {
     return;
   }
 
-  if (loading) {
-    return loading;
+  if (state.loading) {
+    return state.loading;
   }
 
-  loading = (async () => {
+  state.loading = (async () => {
     console.log("[E5] Loading desktop assets...");
 
     if (!fs.existsSync(MODEL_PATH)) {
@@ -117,25 +126,25 @@ async function ensureModels(): Promise<void> {
         validationEncoding.ids.length,
     });
 
-    embeddingSession =
+    state.embeddingSession =
       await ort.InferenceSession.create(
         MODEL_PATH
       );
 
-    tokenizer = localTokenizer;
+    state.tokenizer = localTokenizer;
 
     console.log("[E5] Model OK", {
-      inputNames: embeddingSession.inputNames,
-      outputNames: embeddingSession.outputNames,
+      inputNames: state.embeddingSession.inputNames,
+      outputNames: state.embeddingSession.outputNames,
     });
   })();
 
   try {
-    await loading;
+    await state.loading;
   } catch (error) {
-    tokenizer = null;
-    embeddingSession = null;
-    loading = null;
+    state.tokenizer = null;
+    state.embeddingSession = null;
+    state.loading = null;
     throw error;
   }
 }
@@ -176,14 +185,14 @@ function tokenise(
   inputIds: ort.Tensor;
   attentionMask: ort.Tensor;
 } {
-  if (!tokenizer) {
+  if (!state.tokenizer) {
     throw new Error(
       "E5 tokenizer is not ready"
     );
   }
 
   const sequences = texts.map((text) => {
-    const encoding = tokenizer!.encode(
+    const encoding = state.tokenizer!.encode(
       text
     ) as TokenizerEncoding;
 
@@ -265,7 +274,7 @@ async function embed(
 
   await ensureModels();
 
-  if (!embeddingSession) {
+  if (!state.embeddingSession) {
     throw new Error(
       "E5 embedding session is not ready"
     );
@@ -281,7 +290,7 @@ async function embed(
   } = tokenise(prefixedTexts);
 
   const outputs =
-    await embeddingSession.run({
+    await state.embeddingSession.run({
       input_ids: inputIds,
       attention_mask: attentionMask,
     });
