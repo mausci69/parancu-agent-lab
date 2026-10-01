@@ -315,14 +315,13 @@ test("distinct E5 module identities share initialization and the initialized emb
 
 test("health and readiness are session-free, reflect draining, and preserve Host/origin protection", async t => {
   for (const publicOrigin of [undefined, "https://lab.example"]) {
-    let e5Ready = false;
     const sessions = new SessionManager();
     const resolveSession = t.mock.method(sessions, "resolve", () => assert.fail("probe allocated a session"));
     const store = new CorpusStore(await tempDirectory(t), {
       prepare: () => assert.fail("probe prepared corpus data"),
       enrich: async () => assert.fail("probe enriched corpus data")
     }, noLog);
-    const server = createWebServer({ store, sessions, publicOrigin, webDirectory, isE5Ready: () => e5Ready,
+    const server = createWebServer({ store, sessions, publicOrigin, webDirectory,
       ask: async () => assert.fail("probe started workflow work"), reportError: noLog });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
@@ -339,15 +338,8 @@ test("health and readiness are session-free, reflect draining, and preserve Host
           response.on("end", () => resolve({ status: response.statusCode, body: JSON.parse(body), cookie: response.headers["set-cookie"] }));
         }).on("error", reject);
       });
-    assert.deepEqual(await request("/ready"), { status: 503, body: { ready: false }, cookie: undefined });
+    assert.deepEqual(await request("/ready"), { status: 200, body: { ready: true }, cookie: undefined });
     assert.deepEqual(await request("/health"), { status: 200, body: { ok: true }, cookie: undefined });
-    const initialize = async (initializeE5: () => Promise<void>) => {
-      await initializeE5();
-      e5Ready = true;
-    };
-    await assert.rejects(initialize(async () => { throw new Error("PRIVATE_MODEL_PATH"); }));
-    assert.deepEqual(await request("/ready"), { status: 503, body: { ready: false }, cookie: undefined });
-    await initialize(async () => {});
     for (const draining of [false, true]) {
       if (draining) server.beginDraining();
       assert.deepEqual(await request("/health"), { status: 200, body: { ok: true }, cookie: undefined });
