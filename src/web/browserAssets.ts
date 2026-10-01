@@ -47,8 +47,9 @@ export async function serveBrowserAsset(url: string, response: ServerResponse): 
   }
   const file = files.get(url);
   if (!file) return false;
-  const info = await stat(file[0]);
-  response.writeHead(200, { "Content-Type": file[1], "Content-Length": info.size });
+  await stat(file[0]);
+  // Omit Content-Length so HTTP/1 uses chunked transfer for large streamed assets.
+  response.writeHead(200, { "Content-Type": file[1] });
   // Stream the 113 MiB model rather than allocating a server-side copy per request.
   try { await pipeline(createReadStream(file[0]), response); }
   catch { response.destroy(); }

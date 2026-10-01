@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import fsPromises from "node:fs/promises";
+import fs from "node:fs";
+import { PassThrough } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
@@ -1569,6 +1571,47 @@ test("browser runtime assets retain Host/origin checks and do not resolve sessio
   assert.equal((await globalThis.fetch(base + "/parancu-browser/ort/package.json")).status, 404);
   assert.equal((await globalThis.fetch(base + "/parancu-browser/e5/private.json")).status, 404);
   assert.equal(resolve.mock.callCount(), 0);
+});
+
+test("browser model response is chunked and delivers data before the source finishes", async t => {
+  const directory = await tempDirectory(t);
+  const fixture = path.join(directory, "model.onnx");
+  await writeFile(fixture, "firstsecond");
+  const store = new CorpusStore(directory, { prepare: prepareCorpusLocal, enrich: async c => c }, noLog);
+  const base = await startServer(t, store, service(), new KeyManager());
+  const modelPath = path.resolve(__dirname, "../../services/parancu-api/assets/models/e5/model_int8.onnx");
+  const originalStat = fsPromises.stat;
+  t.mock.method(fsPromises, "stat", async (filename: fs.PathLike) => {
+    assert.equal(filename, modelPath);
+    return originalStat(fixture);
+  });
+  const source = new PassThrough();
+  const stream = t.mock.method(fs, "createReadStream", (filename: fs.PathLike) => {
+    assert.equal(filename, modelPath);
+    return source as unknown as fs.ReadStream;
+  });
+  try {
+    source.write("first");
+    const response = await globalThis.fetch(base + "/parancu-browser/e5/model_int8.onnx");
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "application/octet-stream");
+    assert.equal(response.headers.get("content-length"), null);
+    assert.equal(response.headers.get("transfer-encoding"), "chunked");
+    const reader = response.body!.getReader();
+    const first = await reader.read();
+    assert.equal(first.done, false);
+    assert.equal(Buffer.from(first.value!).toString(), "first");
+    assert.equal(source.writableEnded, false, "response starts before the model stream ends");
+    source.end("second");
+    let rest = "";
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      rest += Buffer.from(chunk.value).toString();
+    }
+    assert.equal(rest, "second");
+    assert.equal(stream.mock.callCount(), 1);
+  } finally { source.destroy(); }
 });
 
 test("Settings UI reflects server key state, clears input, closes on Use key, and switches to local retrieval after removal", async t => {
