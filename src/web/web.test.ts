@@ -564,14 +564,14 @@ for (const publicOrigin of [undefined, "https://lab.example", "https://lab.examp
     const port = (server.address() as AddressInfo).port;
     const host = publicOrigin ? new URL(publicOrigin).host : `127.0.0.1:${port}`;
     const origin = publicOrigin ?? `http://${host}`;
-    const request = (headers: Record<string, string> = {}) => new Promise<{
+    const request = (headers: Record<string, string> = {}, route = "/api/settings/openai", method = "GET") => new Promise<{
       status: number | undefined; headers: http.IncomingHttpHeaders;
     }>((resolve, reject) => {
-      http.get({ hostname: "127.0.0.1", port, path: "/api/settings/openai", headers: { Host: host, ...headers } }, response => {
+      http.request({ hostname: "127.0.0.1", port, path: route, method, headers: { Host: host, ...headers } }, response => {
         response.resume();
         response.on("end", () => resolve({ status: response.statusCode, headers: response.headers }));
         response.on("error", reject);
-      }).on("error", reject);
+      }).on("error", reject).end();
     });
     // Simulate HTTPS termination at a proxy with a plain HTTP backend connection.
     const accepted = await request({ Origin: origin });
@@ -585,6 +585,17 @@ for (const publicOrigin of [undefined, "https://lab.example", "https://lab.examp
     const resumed = await request({ Cookie: cookie.split(";")[0] });
     assert.equal(resumed.status, 200, "same-origin GETs and navigation may omit Origin");
     assert.equal(resumed.headers["set-cookie"], undefined);
+    const navigation = { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" };
+    const landing = await request(navigation, "/");
+    assert.equal(landing.status, 200);
+    assert.equal(landing.headers["set-cookie"], undefined);
+    assert.equal((await request({ "Sec-Fetch-Site": "cross-site" }, "/")).status, 403);
+    assert.equal((await request({ ...navigation, "Sec-Fetch-Mode": "cors" }, "/")).status, 403);
+    assert.equal((await request({ ...navigation, "Sec-Fetch-Dest": "iframe" }, "/")).status, 403);
+    assert.equal((await request(navigation, "/", "POST")).status, 403);
+    assert.equal((await request(navigation)).status, 403, "navigation metadata cannot bypass API protection");
+    assert.equal((await request({ ...navigation, Host: "wrong.example" }, "/")).status, 403);
+    assert.equal((await request({ ...navigation, Origin: "https://wrong.example" }, "/")).status, 403);
     const invalid: Record<string, string>[] = [
       { Host: "wrong.example" }, { Origin: "https://wrong.example" }, { Origin: "null" },
       { Origin: origin, "Sec-Fetch-Site": "cross-site" },

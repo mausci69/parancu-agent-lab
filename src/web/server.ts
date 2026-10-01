@@ -80,9 +80,11 @@ export function createWebServer(options: ServerOptions): http.Server & { closeSe
         throw new WebError(403, "Host not allowed.");
       }
       const origin = publicOrigin ?? `${protocol}://${host}`;
-      if ((request.headers.origin && request.headers.origin !== origin) ||
-          request.headers["sec-fetch-site"] === "cross-site") throw new WebError(403, "Origin not allowed.");
       const url = new URL(request.url ?? "/", origin);
+      const topLevelNavigation = request.method === "GET" && url.pathname === "/" &&
+        request.headers["sec-fetch-mode"] === "navigate" && request.headers["sec-fetch-dest"] === "document";
+      if ((request.headers.origin && request.headers.origin !== origin) ||
+          (request.headers["sec-fetch-site"] === "cross-site" && !topLevelNavigation)) throw new WebError(403, "Origin not allowed.");
       if (request.method === "GET" && url.pathname === "/health") {
         send(200, { ok: true });
         return;
