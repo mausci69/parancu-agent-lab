@@ -1,4 +1,4 @@
-# Allow only runtime sources, package metadata, and the locally provisioned E5 bundle.
+# Allow only runtime sources, package metadata, and the E5 manifest/verifier.
 **
 !package.json
 !package-lock.json
@@ -25,14 +25,6 @@
 !services/parancu-api/src/verifyE5Bundle.ts
 !services/parancu-api/assets/
 !services/parancu-api/assets/e5-manifest.json
-!services/parancu-api/assets/models/
-!services/parancu-api/assets/models/e5/
-!services/parancu-api/assets/models/e5/model_int8.onnx
-!services/parancu-api/assets/models/e5/sentencepiece.bpe.model
-!services/parancu-api/assets/models/e5/special_tokens_map.json
-!services/parancu-api/assets/models/e5/tokenizer_config.json
-!services/parancu-api/assets/models/e5/tokenizer.json
-!services/parancu-api/assets/models/e5/tokenizer.onnx
 **/node_modules
 **/test*.ts
 **/*.test.ts
